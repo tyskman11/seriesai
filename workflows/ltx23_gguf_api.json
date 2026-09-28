@@ -1,0 +1,21 @@
+{
+  "_readme": "LTX-2.3 22B (dev) GGUF Video-Template fuer SeriesAI/ComfyUI. Einfacher linearer Hauptpfad (Prompt -> Encode -> Sample -> Decode -> Speichern), aber jeder Knoten mit vollem Zugriff auf seine Parameter fuer Feintuning. Benoetigt: ComfyUI-GGUF (vorhanden) + ComfyUI-LTXVideo (ueber ComfyUI Manager installieren) fuer die LTXV-Knoten. Platzhalter ${seriesai.*} werden vom Coordinator ersetzt (siehe wan22_lowvram_api.json als Referenzformat).",
+  "1": {"class_type": "UnetLoaderGGUF", "inputs": {"unet_name": "ltx-2.3-22b-dev-Q4_K_M.gguf"}, "_note": "Hauptmodell. Fuer schnelleres Testen auf ltx-2.3-22b-distilled-*.gguf wechseln (weniger Steps noetig)."},
+  "2": {"class_type": "CLIPLoaderGGUF", "inputs": {"clip_name": "gemma-3-12b-it-qat-UD-Q4_K_XL.gguf", "type": "ltxv"}, "_note": "Gemma-3 Text-Encoder (GGUF-quantisiert, VRAM-schonend)."},
+  "3": {"class_type": "VAELoader", "inputs": {"vae_name": "ltx-2.3-22b-dev_video_vae.safetensors"}},
+  "3b": {"class_type": "VAELoader", "inputs": {"vae_name": "ltx-2.3-22b-dev_audio_vae.safetensors"}, "_note": "Audio-VAE fuer synchronisierten Ton; optional weglassen wenn nur Bild gebraucht wird."},
+  "4": {"class_type": "CLIPTextEncode", "inputs": {"text": "${seriesai.prompt}", "clip": ["2", 0]}},
+  "5": {"class_type": "CLIPTextEncode", "inputs": {"text": "${seriesai.negative_prompt}", "clip": ["2", 0]}},
+  "6": {"class_type": "LoraLoaderModelOnly", "inputs": {"model": ["1", 0], "lora_name": "ltx-2.3-22b-distilled-lora-384.safetensors", "strength_model": 0.0}, "_note": "strength_model=0.0 -> LoRA inaktiv (volle dev-Qualitaet, 20+ Steps). Auf 0.6-0.8 setzen fuer schnelle Refine-Passes mit weniger Steps (siehe steps weiter unten dann auf 8 senken)."},
+  "7": {"class_type": "EmptyLTXVLatentVideo", "inputs": {"width": "${seriesai.width}", "height": "${seriesai.height}", "length": "${seriesai.frame_count}", "batch_size": 1}, "_note": "width/height muessen durch 32 teilbar sein, length durch 8 teilbar + 1 (LTX-Vorgabe)."},
+  "8": {"class_type": "KSampler", "inputs": {"model": ["6", 0], "seed": "${seriesai.seed}", "steps": 24, "cfg": 4.0, "sampler_name": "euler", "scheduler": "simple", "positive": ["4", 0], "negative": ["5", 0], "latent_image": ["7", 0], "denoise": 1.0}, "_note": "dev-Modell: steps 20-30, cfg 3-5. Mit aktivierter distilled-LoRA (strength_model>0): steps 4-8, cfg 1.0."},
+  "9": {"class_type": "LTXVSpatialUpscaler", "inputs": {"samples": ["8", 0], "upscale_model": "ltx-2.3-spatial-upscaler-x2-1.1.safetensors", "enabled": false}, "_note": "Optionale 2x-Qualitaetsstufe fuer die finale Aufloesung. Bei 6GB VRAM zunaechst deaktiviert lassen (enabled:false) und nur fuer finale Renders aktivieren."},
+  "10": {"class_type": "VAEDecode", "inputs": {"samples": ["9", 0], "vae": ["3", 0]}},
+  "11": {"class_type": "CreateVideo", "inputs": {"images": ["10", 0], "fps": "${seriesai.fps}", "codec": "h264", "audio_vae": ["3b", 0]}},
+  "12": {"class_type": "SaveVideo", "inputs": {"video": ["11", 0], "filename_prefix": "${seriesai.output_prefix}", "format": "mp4"}},
+  "_lowvram_hinweise": [
+    "ComfyUI mit --lowvram (oder --novram bei anhaltenden OOM) starten, siehe run_wan_lowvram.bat als Vorlage -> run_ltx_lowvram.bat anlegen.",
+    "32GB System-RAM erlaubt CPU-Offloading von Text-Encoder (Knoten 2) und VAE (Knoten 3/3b) automatisch ueber ComfyUI-GGUF.",
+    "Bei OOM: width/height in Knoten 7 reduzieren (z.B. 512x288 statt 768x512) oder frame_count senken, bevor Quant-Stufe des Hauptmodells gewechselt wird."
+  ]
+}

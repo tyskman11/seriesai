@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "seriesai"
+version = "0.1.0"
+description = "Local, resumable television-series continuity and production system"
+requires-python = ">=3.10"
+dependencies = [
+  "pydantic>=2.7,<3",
+  "PyYAML>=6.0,<7",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8,<9"]
+web = ["fastapi>=0.115,<1", "uvicorn[standard]>=0.30,<1"]
+analysis = ["scenedetect[opencv]>=0.6.4,<0.7"]
+transcription = ["faster-whisper>=1.1,<2"]
+
+[project.scripts]
+seriesai = "seriesai.cli:main"
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+
+[tool.setuptools.packages.find]
+where = ["src"]

@@ -1,0 +1,52 @@
+paths:
+  project_root: "."
+  series_root: "Series"
+  comfyui: "../ComfyUI_windows_portable/ComfyUI"
+  ffmpeg: "ffmpeg"
+
+hardware:
+  gpu_vram_gb: 6
+  system_ram_gb: 32
+  prefer_cpu_offload: true
+
+models:
+  transcription_backend: whisperx
+  vision_backend: null
+  llm_backend: ollama
+  tts_backend: null
+  video_backend: comfyui
+
+transcription:
+  backend: "faster_whisper"
+  model: "medium"
+  device: "cpu"
+  compute_type: "int8"
+  beam_size: 5
+
+ollama:
+  base_url: "http://127.0.0.1:11434"
+  # Local German-capable analysis model; suitable for 6 GB VRAM with CPU offload.
+  model: "qwen2.5:3b"
+  timeout_seconds: 180
+
+# Optional local ComfyUI API renderer. Keep video_backend null until a local
+# API workflow template has been exported and configured here.
+comfyui_api:
+  api_url: "http://127.0.0.1:8188"
+  workflow_template: "workflows/ltx23_gguf_api.json"
+  poll_seconds: 2
+  timeout_seconds: 7200
+
+# Optional local Piper executable and voice-model directory for test/dialogue
+# synthesis. Voice cloning remains an explicit future backend choice.
+piper:
+  executable: "piper"
+  models_root: null
+
+processing:
+  checkpoint_enabled: true
+  max_job_retries: 3
+
+localization:
+  analysis_language: "de"
+  output_language: "de"
