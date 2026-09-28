@@ -343,3 +343,21 @@ local project dependencies.
 ## Local Ollama and models
 
 `start.py` keeps Ollama entirely inside the project: the Windows build is downloaded once into `runtime\ollama` (size and SHA-256 are checked against the GitHub release; an interrupted download resumes from its `.part` file), and it runs on its own port `11435` so it never collides with a system-wide Ollama. Models are stored in `models\ollama` (`OLLAMA_MODELS`). The configured model (`qwen3.5:9b`) is verified on every start with a load-and-generate test; if it is missing or incomplete, `ollama pull` resumes and re-verifies every blob, up to three attempts.
+
+## Original voices and cloned dialogue (XTTS-v2)
+
+`python start.py` installs everything for this into the project: PyTorch (CUDA 12.4) and the TTS/speaker libraries into `.venv`, and downloads XTTS-v2 (`models/tts/xtts_v2`) and the ECAPA speaker model (`models/speechbrain`), each verified by size and SHA-256 and resumed if interrupted (`--no-install` skips this). XTTS-v2 is licensed for **non-commercial** use only.
+
+Recognize and clone the original voices (no voice is used before you approve it):
+
+```text
+python -m seriesai.cli embed-voices --series-id game_shakers     # speaker embeddings for every transcribed segment (resumable)
+python -m seriesai.cli cluster-voices --series-id game_shakers   # group them into voices
+python -m seriesai.cli review-voices --series-id game_shakers    # writes Series/voice_review/index.html with listening samples
+python -m seriesai.cli assign-voice --cluster-id vc_001 --character-id kenzie_001
+python -m seriesai.cli reject-voice --cluster-id vc_030          # guest, mixed voices, laugh track
+python -m seriesai.cli build-voice-references --series-id game_shakers
+python -m seriesai.cli synthesize-dialogue --character-id kenzie_001 --text "Hallo!" --output out.wav
+```
+
+The cleanest clips of each approved cluster become `Series/voices/<character_id>/ref_*.wav`, which XTTS clones.

@@ -1,6 +1,6 @@
 """Versioned SQLite schema. IDs are application-assigned and never reused."""
 
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 
 DDL = """
 PRAGMA foreign_keys = ON;
@@ -173,4 +173,27 @@ ALTER TABLE generation_job_items ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0;
 CREATE INDEX IF NOT EXISTS idx_job_item_claim ON generation_job_items(job_id, status, sequence_number);
 """
 
-MIGRATIONS: dict[int, str] = {2: MIGRATION_2, 3: MIGRATION_3, 4: MIGRATION_4, 5: MIGRATION_5, 6: MIGRATION_6, 7: MIGRATION_7, 8: MIGRATION_8, 9: MIGRATION_9}
+MIGRATION_10 = """
+CREATE TABLE IF NOT EXISTS voice_embeddings (
+    segment_id TEXT PRIMARY KEY REFERENCES transcript_segments(segment_id),
+    episode_id TEXT NOT NULL REFERENCES episodes(episode_id),
+    start_seconds REAL NOT NULL,
+    end_seconds REAL NOT NULL,
+    embedding BLOB NOT NULL,
+    cluster_id TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_voice_embeddings_episode ON voice_embeddings(episode_id);
+CREATE INDEX IF NOT EXISTS idx_voice_embeddings_cluster ON voice_embeddings(cluster_id);
+CREATE TABLE IF NOT EXISTS voice_clusters (
+    cluster_id TEXT PRIMARY KEY,
+    series_id TEXT NOT NULL REFERENCES series(series_id),
+    character_id TEXT REFERENCES characters(character_id),
+    segment_count INTEGER NOT NULL,
+    total_seconds REAL NOT NULL,
+    centroid BLOB NOT NULL,
+    status TEXT NOT NULL DEFAULT 'proposed' CHECK(status IN ('proposed','approved','rejected')),
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+"""
+
+MIGRATIONS: dict[int, str] = {2: MIGRATION_2, 3: MIGRATION_3, 4: MIGRATION_4, 5: MIGRATION_5, 6: MIGRATION_6, 7: MIGRATION_7, 8: MIGRATION_8, 9: MIGRATION_9, 10: MIGRATION_10}

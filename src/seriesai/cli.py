@@ -128,6 +128,18 @@ def main() -> None:
     commit_parser.add_argument("--series-id",required=True); commit_parser.add_argument("--episode-id",required=True); commit_parser.add_argument("--episode-code",required=True); commit_parser.add_argument("--date")
     tts_parser = subparsers.add_parser("synthesize-dialogue", help="Synthesize one line with an explicitly configured local voice backend")
     tts_parser.add_argument("--character-id", required=True); tts_parser.add_argument("--text", required=True); tts_parser.add_argument("--output", type=Path, required=True)
+    embed_voices_parser = subparsers.add_parser("embed-voices", help="Compute local speaker embeddings for every transcribed speech segment (resumable)")
+    embed_voices_parser.add_argument("--series-id", required=True)
+    cluster_voices_parser = subparsers.add_parser("cluster-voices", help="Group the embedded speech into voice clusters for review")
+    cluster_voices_parser.add_argument("--series-id", required=True); cluster_voices_parser.add_argument("--force", action="store_true")
+    review_voices_parser = subparsers.add_parser("review-voices", help="List voice clusters and write listening samples to Series/voice_review")
+    review_voices_parser.add_argument("--series-id", required=True)
+    assign_voice_parser = subparsers.add_parser("assign-voice", help="Approve a voice cluster as the original voice of an approved character")
+    assign_voice_parser.add_argument("--cluster-id", required=True); assign_voice_parser.add_argument("--character-id", required=True)
+    reject_voice_parser = subparsers.add_parser("reject-voice", help="Reject a voice cluster (background noise, laugh track, mixed voices)")
+    reject_voice_parser.add_argument("--cluster-id", required=True)
+    voice_refs_parser = subparsers.add_parser("build-voice-references", help="Cut TTS reference clips for every approved character voice")
+    voice_refs_parser.add_argument("--series-id", required=True)
     render_test_parser = subparsers.add_parser("render-self-test", help="Render one small local ComfyUI (LTX) verification shot without changing Series Brain")
     render_test_parser.add_argument("--prompt", default="eine ruhige filmische Einstellung eines leeren modernen Raums bei Abendlicht")
     render_test_parser.add_argument("--frames", type=int, default=9)
@@ -274,6 +286,20 @@ def main() -> None:
         results = VoiceCandidateService(config, db).extract_ready_episodes(args.series_id, reporter.update)
         counts = {status: sum(item.status == status for item in results) for status in {item.status for item in results}}
         print(json.dumps({"series_id": args.series_id, "queued": total, "counts": counts}, ensure_ascii=False))
+    elif args.command in {"embed-voices", "cluster-voices", "review-voices", "assign-voice", "reject-voice", "build-voice-references"}:
+        from .services.voice_identity import VoiceIdentityService
+        db = Database(config.paths.series_root / "series.db")
+        db.initialize(config.paths.project_root / "backups" / "migrations")
+        service = VoiceIdentityService(config, db)
+        if args.command == "embed-voices":
+            results = service.embed_series(args.series_id, lambda done, total, item: print(f"[{done}/{total}] {item.episode_id}: {item.status} ({item.embedded})", flush=True))
+            output = {"series_id": args.series_id, "embedded_segments": sum(item.embedded for item in results), "failed": [item.episode_id for item in results if item.status.startswith("failed")]}
+        elif args.command == "cluster-voices": output = service.cluster_series(args.series_id, args.force)
+        elif args.command == "review-voices": output = service.review_clusters(args.series_id)
+        elif args.command == "assign-voice": output = service.assign_cluster(args.cluster_id, args.character_id)
+        elif args.command == "reject-voice": output = service.reject_cluster(args.cluster_id)
+        else: output = service.build_references(args.series_id)
+        print(json.dumps(output, ensure_ascii=False, indent=2))
     elif args.command == "prepare-character-reference-images":
         db = Database(config.paths.series_root / "series.db")
         db.initialize(config.paths.project_root / "backups" / "migrations")

@@ -13,7 +13,7 @@ models:
   transcription_backend: whisperx
   vision_backend: null
   llm_backend: ollama
-  tts_backend: null
+  tts_backend: xtts   # cloned original voices (XTTS-v2), reviewed via assign-voice
   video_backend: comfyui
 
 transcription:

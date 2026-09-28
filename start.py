@@ -214,7 +214,7 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def download_verified(url: str, target: Path, size: int, sha256: str, label: str) -> bool:
+def download_verified(url: str, target: Path, size: int, sha256: str | None, label: str, verify: bool = True) -> bool:
     """Download with HTTP Range resume; keep the .part file until size and SHA-256 match."""
     part = target.with_name(target.name + ".part")
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -234,7 +234,7 @@ def download_verified(url: str, target: Path, size: int, sha256: str, label: str
                                 last = have * 100 // size; print(f"[{label}] Download {last}% ({have >> 20}/{size >> 20} MB)", flush=True)
         except OSError as error:
             print(f"[{label}] Download unterbrochen ({error}); Versuch {attempt}/3 setzt fort.", flush=True); time.sleep(3); continue
-        if part.stat().st_size == size and _sha256(part) == sha256:
+        if part.stat().st_size == size and (not verify or _sha256(part) == sha256):
             part.replace(target); return True
         print(f"[{label}] Groesse/Pruefsumme stimmt nicht; lade erneut.", flush=True); part.unlink(missing_ok=True)
     return False
@@ -320,6 +320,60 @@ def ensure_ollama_model() -> None:
     print(f"[Modelle] {model} konnte nicht vollstaendig bereitgestellt werden; naechster Start versucht es erneut.", flush=True)
 
 
+TORCH_INDEX = "https://download.pytorch.org/whl/cu124"
+# (label, modules that must import, pip arguments).  Order matters: torch before the TTS stack.
+PYTHON_STACK = [
+    ("Basis", ["pydantic", "yaml", "faster_whisper", "scenedetect", "cv2"], ["pydantic>=2.7,<3", "PyYAML>=6.0,<7", "scenedetect[opencv]>=0.6.4,<0.7", "faster-whisper>=1.1,<2"]),
+    ("PyTorch", ["torch", "torchaudio"], ["torch==2.6.0", "torchaudio==2.6.0", "--index-url", TORCH_INDEX]),
+    ("Sprache", ["TTS", "speechbrain", "soundfile", "sklearn"], ["coqui-tts", "transformers>=4.50,<5", "speechbrain", "soundfile", "scikit-learn"]),
+]
+# Model files fetched straight into the project (size and SHA-256 come from the Hugging Face API).
+HF_MODELS = [
+    ("XTTS-v2", "coqui/XTTS-v2", ["config.json", "vocab.json", "speakers_xtts.pth", "mel_stats.pth", "model.pth"], ROOT / "models" / "tts" / "xtts_v2"),
+    ("ECAPA", "speechbrain/spkrec-ecapa-voxceleb", ["hyperparams.yaml", "embedding_model.ckpt", "mean_var_norm_emb.ckpt", "classifier.ckpt", "label_encoder.txt"], ROOT / "models" / "speechbrain" / "spkrec-ecapa-voxceleb"),
+]
+
+
+def _modules_available(modules: list[str]) -> bool:
+    code = "import importlib.util,sys;sys.exit(0 if all(importlib.util.find_spec(m) for m in sys.argv[1:]) else 1)"
+    return subprocess.run([str(venv_python()), "-c", code, *modules], capture_output=True).returncode == 0
+
+
+def ensure_python_packages() -> None:
+    """Install every Python dependency into the project .venv (each step retried, pip resumes from cache)."""
+    for label, modules, pip in PYTHON_STACK:
+        if _modules_available(modules): continue
+        for attempt in range(1, 4):
+            print(f"[Pip] Installiere {label} (Versuch {attempt}/3) ...", flush=True)
+            process = subprocess.Popen([str(venv_python()), "-m", "pip", "install", *pip_args(), *pip], cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+            for raw in process.stdout:
+                text = raw.decode("utf-8", "replace").rstrip()
+                if text.startswith(("Downloading", "Installing", "Successfully", "ERROR")): print(f"[Pip] {text[:160]}", flush=True)
+            if process.wait() == 0 and _modules_available(modules): break
+        else:
+            print(f"[Pip] {label} konnte nicht installiert werden; naechster Start versucht es erneut.", flush=True)
+
+
+def ensure_model_files() -> None:
+    """Download and verify the TTS and speaker-embedding models into models/."""
+    for label, repo, files, target in HF_MODELS:
+        info = request_json(f"https://huggingface.co/api/models/{repo}?blobs=true")
+        remote = {item["rfilename"]: item for item in (info or {}).get("siblings", [])}
+        for name in files:
+            item, path = remote.get(name), target / name
+            if not item:
+                if not path.exists(): print(f"[Modelle] {label}: {name} nicht abrufbar (offline?).", flush=True)
+                continue
+            size, sha = int(item["size"]), (item.get("lfs") or {}).get("sha256")
+            if path.exists() and path.stat().st_size == size and (sha is None or _sha256(path) == sha): continue
+            path.unlink(missing_ok=True)
+            print(f"[Modelle] {label}: lade {name} ({size >> 20} MB) ...", flush=True)
+            if not download_verified(f"https://huggingface.co/{repo}/resolve/main/{name}", path, size, sha, label, verify=bool(sha)):
+                print(f"[Modelle] {label}: {name} fehlgeschlagen; naechster Start setzt fort.", flush=True)
+        else:
+            print(f"[Modelle] {label} geprueft: {target}", flush=True)
+
+
 def discover_coordinator(port: int) -> str | None:
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1); sock.settimeout(1.2)
@@ -379,10 +433,13 @@ def main() -> None:
     parser.add_argument("--port", default=PORT, type=int)
     parser.add_argument("--join", metavar="URL")
     parser.add_argument("--refresh-seconds", type=float, default=5.0)
+    parser.add_argument("--no-install", action="store_true", help="Skip the Python package and model download/verification step.")
     parser.add_argument("--no-render-worker", action="store_true", help="Do not start the optional configured local render worker.")
     args = parser.parse_args()
     print("\n=== SeriesAI: lokaler Master & Live-Monitor ===\nProjekt: " + str(ROOT), flush=True)
     bootstrap()
+    if not args.no_install:
+        ensure_python_packages(); ensure_model_files()
     ensure_ollama_model()
     local_url = f"http://127.0.0.1:{args.port}"; status = request_json(f"{local_url}/status")
     monitor_url = local_url; client_id = "master"; mode = "Master & Koordinator"
