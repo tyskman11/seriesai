@@ -14,6 +14,12 @@ from .base import VideoBackend
 from ..config import ComfyUIConfig
 
 
+# Wan's recommended negative prompt (English), plus series-specific guards.
+WAN_NEGATIVE_PROMPT = ("blurry, low quality, oversaturated, overexposed, static, still image, worst quality, jpeg artifacts, "
+                       "ugly, deformed, disfigured, extra fingers, poorly drawn hands, poorly drawn face, extra limbs, fused fingers, "
+                       "three legs, cluttered background, walking backwards, text, subtitles, watermark, logo")
+
+
 class ComfyUIWorkflowBackend(VideoBackend):
     """Render via an exported *local* ComfyUI API workflow.
 
@@ -23,7 +29,7 @@ class ComfyUIWorkflowBackend(VideoBackend):
     ``output_path`` only after its API reports success.
     """
     # Low-VRAM resolution (divisible by 32 for LTX); a shot spec may override it.
-    RENDER_DEFAULTS = {"width": 512, "height": 288}
+    RENDER_DEFAULTS = {"width": 704, "height": 384}
 
     def __init__(self, config: ComfyUIConfig, comfyui_root: Path, project_root: Path) -> None:
         if not config.workflow_template:

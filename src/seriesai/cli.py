@@ -35,7 +35,7 @@ from .services.timeline import TimelineService
 from .services.episode_commit import EpisodeCommitService
 from .services.voice_synthesis import VoiceSynthesisService
 from .services.render_readiness import render_readiness
-from .backends.comfyui import ComfyUIWorkflowBackend
+from .backends.comfyui import ComfyUIWorkflowBackend, WAN_NEGATIVE_PROMPT
 
 
 def main() -> None:
@@ -128,7 +128,7 @@ def main() -> None:
     commit_parser.add_argument("--series-id",required=True); commit_parser.add_argument("--episode-id",required=True); commit_parser.add_argument("--episode-code",required=True); commit_parser.add_argument("--date")
     tts_parser = subparsers.add_parser("synthesize-dialogue", help="Synthesize one line with an explicitly configured local voice backend")
     tts_parser.add_argument("--character-id", required=True); tts_parser.add_argument("--text", required=True); tts_parser.add_argument("--output", type=Path, required=True)
-    render_test_parser = subparsers.add_parser("render-self-test", help="Render one small local Wan/ComfyUI verification shot without changing Series Brain")
+    render_test_parser = subparsers.add_parser("render-self-test", help="Render one small local ComfyUI (LTX) verification shot without changing Series Brain")
     render_test_parser.add_argument("--prompt", default="eine ruhige filmische Einstellung eines leeren modernen Raums bei Abendlicht")
     render_test_parser.add_argument("--frames", type=int, default=9)
     render_test_parser.add_argument("--output", type=Path, default=Path("Series/Generated/verification/wan_self_test.mp4"))
@@ -296,13 +296,13 @@ def main() -> None:
         db.initialize(config.paths.project_root / "backups" / "migrations")
         print(json.dumps(VoiceSynthesisService(config, db).synthesize(args.character_id, args.text, args.output), ensure_ascii=False, indent=2))
     elif args.command == "render-self-test":
-        if not 5 <= args.frames <= 81: raise SystemExit("--frames must be between 5 and 81")
+        if not 5 <= args.frames <= 121: raise SystemExit("--frames must be between 5 and 121")
         readiness = render_readiness(config)
         if not readiness["ready"]: raise SystemExit("Local renderer is not ready: " + readiness["required_next_step"])
         output = args.output if args.output.is_absolute() else config.paths.project_root / args.output
-        spec = {"prompt": args.prompt, "negative_prompt": "text, watermark, identity drift, extra limbs", "seed": 424242, "duration_seconds": args.frames / 8, "fps": 8, "frame_count": args.frames, "output_prefix": "seriesai/wan_self_test", "output_path": project_relative(config.paths.project_root, output)}
+        spec = {"prompt": args.prompt, "negative_prompt": WAN_NEGATIVE_PROMPT, "seed": 424242, "duration_seconds": args.frames / 24, "fps": 24, "frame_count": args.frames, "output_prefix": "seriesai/wan_self_test", "output_path": project_relative(config.paths.project_root, output)}
         result = ComfyUIWorkflowBackend(config.comfyui_api, config.paths.comfyui, config.paths.project_root).render_shot(spec)
-        print(json.dumps({"status": "rendered", "output_path": result, "frames": args.frames, "backend": "local_comfyui_wan"}, ensure_ascii=False, indent=2))
+        print(json.dumps({"status": "rendered", "output_path": result, "frames": args.frames, "backend": "local_comfyui"}, ensure_ascii=False, indent=2))
     elif args.command == "adopt-rendered-shot":
         db = Database(config.paths.series_root / "series.db")
         db.initialize(config.paths.project_root / "backups" / "migrations")

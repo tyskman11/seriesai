@@ -35,7 +35,7 @@ ollama:
 # API workflow template has been exported and configured here.
 comfyui_api:
   api_url: "http://127.0.0.1:8188"
-  workflow_template: "workflows/wan22_lowvram_api.json"
+  workflow_template: "workflows/ltx23_gguf_api.json"
   poll_seconds: 2
   timeout_seconds: 7200
 

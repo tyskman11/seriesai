@@ -7,6 +7,7 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
+from ..backends.comfyui import WAN_NEGATIVE_PROMPT
 from ..config import AppConfig
 from ..db import Database
 from ..paths import project_relative
@@ -36,7 +37,7 @@ class ShotQueueService:
             part = 0
             while remaining > 0:
                 sequence += 1; part += 1
-                duration = min(10.0, remaining); remaining -= duration
+                duration = min(5.0, remaining); remaining -= duration   # Wan2.2: 5 s clips (121 frames @ 24 fps)
                 seed = random.SystemRandom().randint(0, 2_147_483_647)
                 filename = f"shot_{sequence:04d}.mp4"
                 spec = {
@@ -45,9 +46,9 @@ class ShotQueueService:
                     "duration_seconds": duration, "location": scene["location"],
                     "character_ids": scene["character_ids"], "action": scene["purpose"],
                     "camera": "auto", "prompt": scene["purpose"] + " " + scene["conflict_or_turn"],
-                    "negative_prompt": "identity drift, extra limbs, text, watermark",
+                    "negative_prompt": WAN_NEGATIVE_PROMPT,
                     "seed": seed, "backend": self.config.models.video_backend,
-                    "fps": 8, "frame_count": max(9, int(duration * 8) // 8 * 8 + 1),
+                    "fps": 24, "frame_count": max(9, round(duration * 24 / 8) * 8 + 1),
                     "output_prefix": f"seriesai/shot_{sequence:04d}_{seed}",
                     "output_path": project_relative(self.config.paths.project_root, shots_root / filename),
                     "status": "pending",

@@ -9,9 +9,9 @@ from ..config import AppConfig
 
 def render_readiness(config: AppConfig) -> dict:
     models = config.paths.comfyui / "models"
-    wan = list((models / "unet").glob("Wan*.gguf")) if models.is_dir() else []
-    encoder = list((models / "text_encoders").glob("umt5*.gguf")) if models.is_dir() else []
-    vae = list((models / "vae").glob("wan*.safetensors")) if models.is_dir() else []
+    wan = [path for pattern in ("ltx*.gguf", "Wan*.gguf") for path in ((models / "unet").glob(pattern) if models.is_dir() else [])]
+    encoder = [path for pattern in ("gemma*.gguf", "umt5*.gguf") for path in ((models / "text_encoders").glob(pattern) if models.is_dir() else [])]
+    vae = [path for pattern in ("ltx*.safetensors", "wan*.safetensors") for path in ((models / "vae").glob(pattern) if models.is_dir() else [])]
     api_online = False
     try:
         with urlopen(config.comfyui_api.api_url.rstrip("/") + "/system_stats", timeout=2) as response:
