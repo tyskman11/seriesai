@@ -9,8 +9,7 @@
   "6": {"class_type": "LoraLoaderModelOnly", "inputs": {"model": ["1", 0], "lora_name": "ltx-2.3-22b-distilled-lora-384.safetensors", "strength_model": 0.0}, "_note": "strength_model=0.0 -> LoRA inaktiv (volle dev-Qualitaet, 20+ Steps). Auf 0.6-0.8 setzen fuer schnelle Refine-Passes mit weniger Steps (siehe steps weiter unten dann auf 8 senken)."},
   "7": {"class_type": "EmptyLTXVLatentVideo", "inputs": {"width": "${seriesai.width}", "height": "${seriesai.height}", "length": "${seriesai.frame_count}", "batch_size": 1}, "_note": "width/height muessen durch 32 teilbar sein, length durch 8 teilbar + 1 (LTX-Vorgabe)."},
   "8": {"class_type": "KSampler", "inputs": {"model": ["6", 0], "seed": "${seriesai.seed}", "steps": 24, "cfg": 4.0, "sampler_name": "euler", "scheduler": "simple", "positive": ["4", 0], "negative": ["5", 0], "latent_image": ["7", 0], "denoise": 1.0}, "_note": "dev-Modell: steps 20-30, cfg 3-5. Mit aktivierter distilled-LoRA (strength_model>0): steps 4-8, cfg 1.0."},
-  "9": {"class_type": "LTXVSpatialUpscaler", "inputs": {"samples": ["8", 0], "upscale_model": "ltx-2.3-spatial-upscaler-x2-1.1.safetensors", "enabled": false}, "_note": "Optionale 2x-Qualitaetsstufe fuer die finale Aufloesung. Bei 6GB VRAM zunaechst deaktiviert lassen (enabled:false) und nur fuer finale Renders aktivieren."},
-  "10": {"class_type": "VAEDecode", "inputs": {"samples": ["9", 0], "vae": ["3", 0]}},
+  "10": {"class_type": "VAEDecode", "inputs": {"samples": ["8", 0], "vae": ["3", 0]}, "_note": "Der optionale 2x-Upscaler (LTXVSpatialUpscaler) ist in dieser ComfyUI-Installation nicht vorhanden und wurde entfernt."},
   "11": {"class_type": "CreateVideo", "inputs": {"images": ["10", 0], "fps": "${seriesai.fps}", "codec": "h264", "audio_vae": ["3b", 0]}},
   "12": {"class_type": "SaveVideo", "inputs": {"video": ["11", 0], "filename_prefix": "${seriesai.output_prefix}", "format": "mp4"}},
   "_lowvram_hinweise": [

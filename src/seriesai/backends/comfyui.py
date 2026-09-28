@@ -22,6 +22,9 @@ class ComfyUIWorkflowBackend(VideoBackend):
     never edited in place.  ComfyUI output is copied to the queue's immutable
     ``output_path`` only after its API reports success.
     """
+    # Low-VRAM resolution (divisible by 32 for LTX); a shot spec may override it.
+    RENDER_DEFAULTS = {"width": 512, "height": 288}
+
     def __init__(self, config: ComfyUIConfig, comfyui_root: Path, project_root: Path) -> None:
         if not config.workflow_template:
             raise ValueError("comfyui_api.workflow_template is required for local rendering")
@@ -33,7 +36,7 @@ class ComfyUIWorkflowBackend(VideoBackend):
     def render_shot(self, specification: dict, on_submitted: Callable[[str], None] | None = None) -> str:
         template = json.loads(Path(self.config.workflow_template).read_text(encoding="utf-8"))
         client_id = str(uuid.uuid4())
-        workflow = self._replace(template, specification)
+        workflow = self._replace(template, {**self.RENDER_DEFAULTS, **specification})
         queued = self._post("/prompt", {"prompt": workflow, "client_id": f"seriesai-{client_id}"})
         prompt_id = queued.get("prompt_id")
         if not prompt_id:
@@ -61,7 +64,8 @@ class ComfyUIWorkflowBackend(VideoBackend):
         raise TimeoutError(f"ComfyUI did not complete shot within {self.config.timeout_seconds}s")
 
     def _replace(self, value, spec):
-        if isinstance(value, dict): return {key: self._replace(item, spec) for key, item in value.items()}
+        # Keys starting with "_" are template comments (_readme, _note) that ComfyUI rejects.
+        if isinstance(value, dict): return {key: self._replace(item, spec) for key, item in value.items() if not key.startswith("_")}
         if isinstance(value, list): return [self._replace(item, spec) for item in value]
         if isinstance(value, str) and value.startswith("${seriesai.") and value.endswith("}"):
             key = value[11:-1]

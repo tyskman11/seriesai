@@ -47,7 +47,7 @@ class ShotQueueService:
                     "camera": "auto", "prompt": scene["purpose"] + " " + scene["conflict_or_turn"],
                     "negative_prompt": "identity drift, extra limbs, text, watermark",
                     "seed": seed, "backend": self.config.models.video_backend,
-                    "fps": 8, "frame_count": max(9, int(duration * 8) // 4 * 4 + 1),
+                    "fps": 8, "frame_count": max(9, int(duration * 8) // 8 * 8 + 1),
                     "output_prefix": f"seriesai/shot_{sequence:04d}_{seed}",
                     "output_path": project_relative(self.config.paths.project_root, shots_root / filename),
                     "status": "pending",
