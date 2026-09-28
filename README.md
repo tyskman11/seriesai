@@ -36,7 +36,7 @@ cd <PROJECT_ROOT>
 python start.py
 ```
 
-`start.py` is the only start script. Double-click it on Windows: it opens exactly one Windows Terminal tab and always keeps the live monitor visible. In a terminal use `python start.py`. It creates a local virtual environment, installs required dependencies, and starts the local Coordinator only if it is not already running. It uses no administrator rights or `sudo`; on Linux/Ubuntu pip calls include `--break-system-packages`. Use `python -m seriesai.cli doctor` to inspect the local machine without making changes.
+`start.py` is the only start script. Double-click it on Windows: it opens exactly one terminal and runs **all services in it** — Ollama, ComfyUI, the Coordinator and the local render worker — with every output line prefixed (`[ComfyUI]`, `[Ollama]`, `[Koordinator]`, `[Worker]`) next to the live monitor. Services that already answer (for example a running ComfyUI) are not started twice. `Strg+C` stops the monitor and every service started by it. In a terminal use `python start.py`. It creates a local virtual environment and installs required dependencies. It uses no administrator rights or `sudo`; on Linux/Ubuntu pip calls include `--break-system-packages`. Use `python -m seriesai.cli doctor` to inspect the local machine without making changes.
 
 ## ComfyUI integration
 

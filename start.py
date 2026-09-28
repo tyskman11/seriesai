@@ -16,6 +16,7 @@ import sys
 import time
 import re
 import shutil
+import threading
 from pathlib import Path
 from urllib.error import URLError
 from urllib.request import Request, urlopen
@@ -55,7 +56,7 @@ def request_json(url: str, payload: dict | None = None) -> dict | None:
     try:
         data = json.dumps(payload).encode() if payload is not None else None
         request = Request(url, data=data, headers={"Content-Type": "application/json"}, method="POST" if data else "GET")
-        with urlopen(request, timeout=2) as response:
+        with urlopen(request, timeout=10) as response:
             return json.loads(response.read())
     except (URLError, TimeoutError, json.JSONDecodeError):
         return None
@@ -87,7 +88,7 @@ def _pid_is_alive(pid: int) -> bool:
         return False
     if os.name == "nt":
         try:
-            result = subprocess.run(["tasklist", "/FI", f"PID eq {pid}", "/NH"], capture_output=True, text=True, timeout=5)
+            result = subprocess.run(["tasklist", "/FI", f"PID eq {pid}", "/NH"], capture_output=True, text=True, errors="replace", timeout=5)
             return str(pid) in result.stdout
         except (OSError, subprocess.SubprocessError):
             return False
@@ -98,8 +99,85 @@ def _pid_is_alive(pid: int) -> bool:
         return False
 
 
+class Supervisor:
+    """Runs every SeriesAI service as a child of this one terminal.
+
+    Each child's output is prefixed with its name (``[ComfyUI]``, ``[Worker]`` ...)
+    and interleaved with the live monitor, so no extra console windows are needed.
+    Strg+C stops the monitor *and* all children started here.
+    """
+
+    def __init__(self) -> None:
+        self.children: dict[str, subprocess.Popen] = {}
+        self.specs: dict[str, tuple[list[str], Path]] = {}
+
+    def spawn(self, name: str, command: list[str], cwd: Path) -> subprocess.Popen:
+        env = {**os.environ, "PYTHONUNBUFFERED": "1", "PYTHONIOENCODING": "utf-8"}
+        kwargs: dict = {"cwd": cwd, "env": env, "stdin": subprocess.DEVNULL, "stdout": subprocess.PIPE, "stderr": subprocess.STDOUT}
+        # Own process group: Ctrl+C is handled here and children are stopped cleanly.
+        if os.name == "nt": kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+        else: kwargs["start_new_session"] = True
+        process = subprocess.Popen(command, **kwargs)
+        self.children[name], self.specs[name] = process, (command, cwd)
+        threading.Thread(target=self._pump, args=(name, process), daemon=True).start()
+        print(f"[{name}] gestartet (PID {process.pid}).", flush=True)
+        return process
+
+    @staticmethod
+    def _pump(name: str, process: subprocess.Popen) -> None:
+        for raw in iter(process.stdout.readline, b""):
+            text = raw.decode("utf-8", "replace").rstrip()
+            if text: print(f"[{name}] {text}", flush=True)
+
+    def check(self, url: str) -> None:
+        """Report exited children; restart the coordinator/worker unless a new coordinator took over."""
+        for name, process in list(self.children.items()):
+            if process.poll() is None: continue
+            del self.children[name]
+            print(f"[{name}] beendet (Code {process.returncode}).", flush=True)
+            if name == "Koordinator":
+                time.sleep(2)  # a dashboard restart re-executes the coordinator as a new process
+                if request_json(f"{url}/status"): print("[Koordinator] laeuft nach Neustart weiter (Ausgabe in logs/).", flush=True)
+                else: self.spawn(name, *self.specs[name])
+            elif name == "Worker":
+                time.sleep(5); self.spawn(name, *self.specs[name])
+
+    def stop_all(self) -> None:
+        for process in self.children.values():
+            if process.poll() is None: process.terminate()
+        deadline = time.monotonic() + 8
+        for process in self.children.values():
+            try: process.wait(max(0.1, deadline - time.monotonic()))
+            except subprocess.TimeoutExpired: process.kill()
+        self.children.clear()
+
+
+SUPERVISOR = Supervisor()
+COMFYUI_URL = "http://127.0.0.1:8188"
+COMFYUI_ARGS = ["--windows-standalone-build", "--enable-manager", "--lowvram", "--reserve-vram", "1"]
+
+
+def configured_comfyui_root() -> Path | None:
+    """The portable ComfyUI folder (parent of ``ComfyUI``) from ``paths.comfyui``."""
+    match = re.search(r"(?ms)^paths:\s*(.*?)(?=^[A-Za-z_]+:|\Z)", (ROOT / "config.yaml").read_text(encoding="utf-8"))
+    value = re.search(r"^\s*comfyui:\s*[\"']?([^\"'#\r\n]+?)[\"']?\s*(?:#.*)?$", match.group(1), re.MULTILINE) if match else None
+    return (ROOT / value.group(1)).resolve().parent if value else None
+
+
+def ensure_comfyui() -> None:
+    """Start the local ComfyUI server inside this terminal unless it already answers."""
+    if configured_video_backend() != "comfyui": return
+    if request_json(f"{COMFYUI_URL}/system_stats"):
+        print("[ComfyUI] laeuft bereits.", flush=True); return
+    root = configured_comfyui_root()
+    python = root / "python_embeded" / "python.exe" if root else None
+    if not python or not python.exists():
+        print("[ComfyUI] python_embeded nicht gefunden; bitte ComfyUI manuell starten.", flush=True); return
+    SUPERVISOR.spawn("ComfyUI", [str(python), "-s", "ComfyUI/main.py", *COMFYUI_ARGS], root)
+
+
 def ensure_local_render_worker(master_url: str, client_id: str) -> None:
-    """Start exactly one hidden local worker when ComfyUI rendering is enabled."""
+    """Start exactly one local render worker in this terminal when ComfyUI rendering is enabled."""
     if configured_video_backend() != "comfyui":
         return
     state = _worker_state_path(client_id)
@@ -111,13 +189,8 @@ def ensure_local_render_worker(master_url: str, client_id: str) -> None:
     except (OSError, ValueError, TypeError, json.JSONDecodeError):
         pass
     state.parent.mkdir(parents=True, exist_ok=True)
-    log = ROOT / "logs" / f"render-worker-{re.sub(r'[^A-Za-z0-9_.-]+', '_', client_id)}.log"
-    kwargs: dict = {"cwd": ROOT, "stdout": open(log, "a", encoding="utf-8"), "stderr": open(str(log) + ".err", "a", encoding="utf-8")}
-    if os.name == "nt": kwargs["creationflags"] = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
-    else: kwargs["start_new_session"] = True
-    worker = subprocess.Popen([str(venv_python()), "-m", "seriesai.worker", "--master", master_url, "--worker-id", client_id], **kwargs)
+    worker = SUPERVISOR.spawn("Worker", [str(venv_python()), "-m", "seriesai.worker", "--master", master_url, "--worker-id", client_id], ROOT)
     state.write_text(json.dumps({"pid": worker.pid, "worker_id": client_id, "master_url": master_url}, indent=2), encoding="utf-8")
-    print(f"[Worker] Lokaler Render-Worker gestartet (PID {worker.pid}).", flush=True)
 
 
 def ensure_ollama_model() -> None:
@@ -134,10 +207,7 @@ def ensure_ollama_model() -> None:
             print("[Modelle] Ollama ist nicht verfuegbar; Modell-Check uebersprungen.", flush=True)
             return
         print("[Modelle] Starte lokalen Ollama-Dienst ...", flush=True)
-        kwargs: dict = {"stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
-        if os.name == "nt": kwargs["creationflags"] = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
-        else: kwargs["start_new_session"] = True
-        subprocess.Popen([str(executable), "serve"], **kwargs)
+        SUPERVISOR.spawn("Ollama", [str(executable), "serve"], ROOT)
         for _ in range(20):
             time.sleep(.5); tags = request_json(f"{base_url}/api/tags")
             if tags is not None: break
@@ -205,10 +275,11 @@ def human_duration(seconds: int | None) -> str:
 def monitor(url: str, interval: float, client_id: str, mode: str) -> None:
     print(f"\nDashboard: {url}/")
     print(f"Dieser Rechner: {mode}")
-    print("Live-Monitor aktiv. Strg+C beendet nur diese Anzeige; SeriesAI laeuft weiter.\n")
+    print("Live-Monitor aktiv. Alle Dienste laufen in diesem Terminal. Strg+C beendet sie alle.\n")
     restart_generation: int | None = None
     try:
         while True:
+            SUPERVISOR.check(url)
             status = request_json(f"{url}/status"); stamp = time.strftime("%H:%M:%S")
             if not status:
                 print(f"[{stamp}] Warte auf den Koordinator ...", flush=True)
@@ -219,6 +290,7 @@ def monitor(url: str, interval: float, client_id: str, mode: str) -> None:
                     restart_generation = generation
                 elif generation != restart_generation:
                     print("[Neustart] Vom Master angefordert. Dieser Client startet im selben Terminal neu ...", flush=True)
+                    SUPERVISOR.stop_all()
                     os.execv(sys.executable, [sys.executable, str(Path(__file__).resolve()), *sys.argv[1:]])
                 own_node = next((node for node in status.get("worker_nodes", []) if node.get("id") == client_id), None)
                 own_role = own_node.get("role", "wird zugewiesen") if own_node else "nicht verbunden"
@@ -229,7 +301,9 @@ def monitor(url: str, interval: float, client_id: str, mode: str) -> None:
                 print(f"[{stamp}] Eigene Rolle: {own_role} | Verbundene Clients: {status.get('workers', 0)} | Transkripte {pipeline.get('transcripts', 0)}/{pipeline.get('audio', 0)} | Szenen {pipeline.get('scenes', 0)}/{pipeline.get('episodes', 0)} | {render} | Render-ETA {human_duration(pipeline.get('render_eta_seconds'))}\n           Jetzt: {current}", flush=True)
             time.sleep(interval)
     except KeyboardInterrupt:
-        print("\nLive-Monitor beendet. Der Koordinator und laufende Jobs bleiben aktiv.")
+        print("\nBeende alle SeriesAI-Dienste ...", flush=True)
+        SUPERVISOR.stop_all()
+        print("Alles beendet. Unterbrochene Renderjobs setzt `recover-queue` fort.")
 
 
 def main() -> None:
@@ -255,14 +329,10 @@ def main() -> None:
             if not result: raise SystemExit(f"Koordinator konnte diesen Worker nicht aufnehmen: {join_url}")
             print(f"Mit Master verbunden: {join_url} (Worker {result['worker_id']}).", flush=True); monitor_url = join_url.rstrip("/"); mode = f"Worker von {monitor_url}"
         else:
-            kwargs: dict = {"cwd": ROOT, "stdout": open(ROOT / "logs" / "coordinator.out.log", "a"), "stderr": open(ROOT / "logs" / "coordinator.error.log", "a")}
-            if os.name == "nt": kwargs["creationflags"] = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
-            else: kwargs["start_new_session"] = True
-            # The visible monitor intentionally stays in the invoking Python
-            # process.  The detached coordinator uses the project venv so its
-            # optional local modules (YAML, Pydantic, future backends) are
-            # always available after a dashboard-triggered restart.
-            subprocess.Popen([str(venv_python()), "-m", "seriesai.coordinator", "--host", args.host, "--port", str(args.port)], **kwargs)
+            # The coordinator runs as a child of this terminal (output prefixed
+            # [Koordinator]) with the project venv, so its optional local modules
+            # (YAML, Pydantic, future backends) are available after a restart.
+            SUPERVISOR.spawn("Koordinator", [str(venv_python()), "-m", "seriesai.coordinator", "--host", args.host, "--port", str(args.port)], ROOT)
             for _ in range(20):
                 time.sleep(.25); status = request_json(f"{local_url}/status")
                 if status: break
@@ -271,6 +341,7 @@ def main() -> None:
     else:
         print(f"SeriesAI laeuft bereits (PID {status['pid']}, Worker {status['workers']}).", flush=True)
     if not args.no_render_worker:
+        ensure_comfyui()
         ensure_local_render_worker(monitor_url, client_id)
     monitor(monitor_url, max(1.0, args.refresh_seconds), client_id, mode)
 
