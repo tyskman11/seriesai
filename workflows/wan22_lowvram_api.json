@@ -6,7 +6,7 @@
   "5": {"class_type": "CLIPTextEncode", "inputs": {"text": "${seriesai.negative_prompt}", "clip": ["2", 0]}},
   "6": {"class_type": "WanImageToVideo", "inputs": {"positive": ["4", 0], "negative": ["5", 0], "vae": ["3", 0], "width": 512, "height": 288, "length": "${seriesai.frame_count}", "batch_size": 1}},
   "7": {"class_type": "KSampler", "inputs": {"model": ["1", 0], "seed": "${seriesai.seed}", "steps": 20, "cfg": 5.0, "sampler_name": "euler", "scheduler": "simple", "positive": ["6", 0], "negative": ["6", 1], "latent_image": ["6", 2], "denoise": 1.0}},
-  "8": {"class_type": "VAEDecode", "inputs": {"samples": ["7", 0], "vae": ["3", 0]}},
+  "8": {"class_type": "VAEDecodeTiled", "inputs": {"samples": ["7", 0], "vae": ["3", 0], "tile_size": 512, "overlap": 64, "temporal_size": 16, "temporal_overlap": 4}, "_note": "Tiled/chunked decode: der normale VAEDecode brauchte ~22 min fuer 81 Frames auf 6 GB VRAM."},
   "9": {"class_type": "CreateVideo", "inputs": {"images": ["8", 0], "fps": "${seriesai.fps}", "codec": "h264"}},
   "10": {"class_type": "SaveVideo", "inputs": {"video": ["9", 0], "filename_prefix": "${seriesai.output_prefix}", "format": "mp4"}}
 }
