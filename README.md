@@ -339,3 +339,7 @@ Restore the complete set while SeriesAI is stopped. The database is intentionall
 The coordinator always runs with the project's `.venv` Python. This keeps the
 single visible `start.py` monitor while ensuring dashboard restarts retain all
 local project dependencies.
+
+## Local Ollama and models
+
+`start.py` keeps Ollama entirely inside the project: the Windows build is downloaded once into `runtime\ollama` (size and SHA-256 are checked against the GitHub release; an interrupted download resumes from its `.part` file), and it runs on its own port `11435` so it never collides with a system-wide Ollama. Models are stored in `models\ollama` (`OLLAMA_MODELS`). The configured model (`qwen3.5:9b`) is verified on every start with a load-and-generate test; if it is missing or incomplete, `ollama pull` resumes and re-verifies every blob, up to three attempts.

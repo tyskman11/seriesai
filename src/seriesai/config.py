@@ -37,7 +37,7 @@ class TranscriptionConfig(BaseModel):
 
 
 class OllamaConfig(BaseModel):
-    base_url: str = "http://127.0.0.1:11434"
+    base_url: str = "http://127.0.0.1:11435"
     model: str | None = None
     timeout_seconds: int = Field(default=180, ge=1)
 

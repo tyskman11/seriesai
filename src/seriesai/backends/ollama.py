@@ -15,7 +15,7 @@ class OllamaBackend(LLMBackend):
         self.base_url, self.model, self.retries = base_url.rstrip("/"), model, retries
 
     def generate(self, prompt: str, *, system: str | None = None) -> str:
-        payload = {"model": self.model, "prompt": prompt, "stream": False}
+        payload = {"model": self.model, "prompt": prompt, "stream": False, "think": False}
         if system: payload["system"] = system
         return self._request(payload)["response"]
 
@@ -38,7 +38,7 @@ class OllamaBackend(LLMBackend):
         for _ in range(self.retries + 1):
             try:
                 payload: dict[str, Any] = {"model": self.model, "prompt": prompt + "\n\n" + instruction,
-                                           "stream": False, "format": json_schema, "options": {"temperature": 0.15}}
+                                           "stream": False, "think": False, "format": json_schema, "options": {"temperature": 0.15}}
                 if system: payload["system"] = system
                 response = self._request(payload)["response"].strip()
                 if response.startswith("```"):

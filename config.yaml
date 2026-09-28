@@ -24,9 +24,11 @@ transcription:
   beam_size: 5
 
 ollama:
-  base_url: "http://127.0.0.1:11434"
-  # Local German-capable analysis model; suitable for 6 GB VRAM with CPU offload.
-  model: "qwen2.5:3b"
+  # Project-local Ollama (runtime/ollama, models in models/ollama) on its own port,
+  # so it never collides with a system-wide Ollama on 11434. Started by start.py.
+  base_url: "http://127.0.0.1:11435"
+  # Local German-capable analysis model (6.6 GB); runs on 6 GB VRAM with CPU offload.
+  model: "qwen3.5:9b"
   timeout_seconds: 180
 
 # Optional local ComfyUI API renderer. Keep video_backend null until a local

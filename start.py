@@ -15,8 +15,10 @@ import subprocess
 import sys
 import time
 import re
+import hashlib
 import shutil
 import threading
+import zipfile
 from pathlib import Path
 from urllib.error import URLError
 from urllib.request import Request, urlopen
@@ -111,8 +113,8 @@ class Supervisor:
         self.children: dict[str, subprocess.Popen] = {}
         self.specs: dict[str, tuple[list[str], Path]] = {}
 
-    def spawn(self, name: str, command: list[str], cwd: Path) -> subprocess.Popen:
-        env = {**os.environ, "PYTHONUNBUFFERED": "1", "PYTHONIOENCODING": "utf-8"}
+    def spawn(self, name: str, command: list[str], cwd: Path, extra_env: dict[str, str] | None = None) -> subprocess.Popen:
+        env = {**os.environ, "PYTHONUNBUFFERED": "1", "PYTHONIOENCODING": "utf-8", **(extra_env or {})}
         kwargs: dict = {"cwd": cwd, "env": env, "stdin": subprocess.DEVNULL, "stdout": subprocess.PIPE, "stderr": subprocess.STDOUT}
         # Own process group: Ctrl+C is handled here and children are stopped cleanly.
         if os.name == "nt": kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
@@ -193,65 +195,129 @@ def ensure_local_render_worker(master_url: str, client_id: str) -> None:
     state.write_text(json.dumps({"pid": worker.pid, "worker_id": client_id, "master_url": master_url}, indent=2), encoding="utf-8")
 
 
-def ensure_ollama_model() -> None:
-    """Check/download only the configured local Ollama model; never install Ollama."""
-    model = configured_ollama_model()
-    if not model:
-        print("[Modelle] Kein Ollama-Modell konfiguriert; semantische Analyse bleibt deaktiviert.", flush=True)
-        return
-    base_url = "http://127.0.0.1:11434"
-    tags = request_json(f"{base_url}/api/tags")
-    if tags is None:
-        executable = find_or_install_ollama()
-        if not executable:
-            print("[Modelle] Ollama ist nicht verfuegbar; Modell-Check uebersprungen.", flush=True)
-            return
-        print("[Modelle] Starte lokalen Ollama-Dienst ...", flush=True)
-        SUPERVISOR.spawn("Ollama", [str(executable), "serve"], ROOT)
-        for _ in range(20):
-            time.sleep(.5); tags = request_json(f"{base_url}/api/tags")
-            if tags is not None: break
-        if tags is None:
-            print("[Modelle] Ollama-Dienst konnte nicht gestartet werden.", flush=True)
-            return
-    available = {item.get("name") for item in tags.get("models", [])}
-    if model in available:
-        print(f"[Modelle] Ollama-Modell bereit: {model}", flush=True)
-        return
-    print(f"[Modelle] Lade fehlendes lokales Modell: {model}", flush=True)
+OLLAMA_HOME = ROOT / "runtime" / "ollama"
+OLLAMA_MODELS = ROOT / "models" / "ollama"
+OLLAMA_RELEASE_API = "https://api.github.com/repos/ollama/ollama/releases/latest"
+OLLAMA_ASSET = "ollama-windows-amd64.zip"
+
+
+def configured_ollama_url() -> str:
+    match = re.search(r"(?ms)^ollama:\s*(.*?)(?=^[A-Za-z_]+:|\Z)", (ROOT / "config.yaml").read_text(encoding="utf-8"))
+    url = re.search(r'^\s*base_url:\s*["\']?([^"\'\s#]+)', match.group(1), re.MULTILINE) if match else None
+    return url.group(1).rstrip("/") if url else "http://127.0.0.1:11435"
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(1 << 20), b""): digest.update(block)
+    return digest.hexdigest()
+
+
+def download_verified(url: str, target: Path, size: int, sha256: str, label: str) -> bool:
+    """Download with HTTP Range resume; keep the .part file until size and SHA-256 match."""
+    part = target.with_name(target.name + ".part")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    for attempt in range(1, 4):
+        have = part.stat().st_size if part.exists() else 0
+        if have > size: part.unlink(); have = 0
+        try:
+            if have < size:
+                request = Request(url, headers={"Range": f"bytes={have}-"} if have else {})
+                with urlopen(request, timeout=60) as response:
+                    if have and response.status != 206: part.unlink(); have = 0   # server ignored Range: restart
+                    last = -1
+                    with part.open("ab" if have else "wb") as out:
+                        while chunk := response.read(1 << 20):
+                            out.write(chunk); have += len(chunk)
+                            if have * 100 // size != last:
+                                last = have * 100 // size; print(f"[{label}] Download {last}% ({have >> 20}/{size >> 20} MB)", flush=True)
+        except OSError as error:
+            print(f"[{label}] Download unterbrochen ({error}); Versuch {attempt}/3 setzt fort.", flush=True); time.sleep(3); continue
+        if part.stat().st_size == size and _sha256(part) == sha256:
+            part.replace(target); return True
+        print(f"[{label}] Groesse/Pruefsumme stimmt nicht; lade erneut.", flush=True); part.unlink(missing_ok=True)
+    return False
+
+
+def ollama_executable() -> Path | None:
+    """The project-local Ollama; downloaded and verified into runtime/ollama when missing."""
+    exe = OLLAMA_HOME / ("ollama.exe" if os.name == "nt" else "ollama")
+    if exe.exists(): return exe
+    if os.name != "nt":
+        found = shutil.which("ollama")
+        return Path(found) if found else None
+    print("[Ollama] Lokale Installation fehlt; lade sie nach runtime/ollama ...", flush=True)
+    release = request_json(OLLAMA_RELEASE_API)
+    asset = next((a for a in (release or {}).get("assets", []) if a.get("name") == OLLAMA_ASSET), None)
+    if not asset or not str(asset.get("digest", "")).startswith("sha256:"):
+        print("[Ollama] Release-Informationen nicht abrufbar; spaeter erneut versuchen.", flush=True); return None
+    archive = ROOT / "runtime" / "downloads" / OLLAMA_ASSET
+    if not download_verified(asset["browser_download_url"], archive, int(asset["size"]), asset["digest"][7:], "Ollama"):
+        print("[Ollama] Download fehlgeschlagen; naechster Start setzt fort.", flush=True); return None
+    print("[Ollama] Entpacke ...", flush=True)
+    staging = OLLAMA_HOME.with_name("ollama.staging")
+    shutil.rmtree(staging, ignore_errors=True)
+    with zipfile.ZipFile(archive) as bundle:
+        if bundle.testzip() is not None: archive.unlink(); print("[Ollama] Archiv defekt; wird neu geladen.", flush=True); return None
+        bundle.extractall(staging)
+    shutil.rmtree(OLLAMA_HOME, ignore_errors=True); staging.replace(OLLAMA_HOME)
+    (OLLAMA_HOME / "VERSION").write_text(str(release.get("tag_name", "")), encoding="utf-8")
+    archive.unlink(missing_ok=True)
+    return exe if exe.exists() else None
+
+
+def _model_answers(base_url: str, model: str) -> bool:
+    """Smoke test: the model must load from disk and generate text."""
+    try:
+        request = Request(f"{base_url}/api/generate", data=json.dumps({"model": model, "prompt": "Sage: Hallo", "stream": False, "think": False, "options": {"num_predict": 8}}).encode(), headers={"Content-Type": "application/json"})
+        with urlopen(request, timeout=900) as response: return bool(json.loads(response.read()).get("response", "").strip())
+    except (OSError, json.JSONDecodeError): return False
+
+
+def _pull_model(base_url: str, model: str) -> bool:
     request = Request(f"{base_url}/api/pull", data=json.dumps({"name": model, "stream": True}).encode(), headers={"Content-Type": "application/json"})
+    last = ""
     try:
         with urlopen(request, timeout=3600) as response:
             for raw in response:
                 update = json.loads(raw)
+                if update.get("error"): print(f"[Modelle] Fehler: {update['error']}", flush=True); return False
                 total, completed = update.get("total"), update.get("completed")
-                if total and completed is not None:
-                    print(f"[Modelle] {model}: {completed * 100 // total}%", flush=True)
-                elif update.get("status"):
-                    print(f"[Modelle] {update['status']}", flush=True)
-    except OSError as error:
-        print(f"[Modelle] Download fehlgeschlagen: {error}", flush=True)
+                line = f"{model}: {completed * 100 // total}%" if total and completed is not None else update.get("status", "")
+                if line and line != last: print(f"[Modelle] {line}", flush=True); last = line
+        return True
+    except (OSError, json.JSONDecodeError) as error:
+        print(f"[Modelle] Download unterbrochen: {error}", flush=True); return False
 
 
-def find_or_install_ollama() -> Path | None:
-    found = shutil.which("ollama")
-    if found:
-        return Path(found)
-    if os.name == "nt":
-        local = Path(os.environ.get("LOCALAPPDATA", "")) / "Programs" / "Ollama" / "ollama.exe"
-        if local.exists():
-            return local
-        print("[Vorbereitung] Ollama fehlt. Installiere es mit dem offiziellen Windows-Installer ...", flush=True)
-        command = "irm https://ollama.com/install.ps1 | iex"
-        try:
-            subprocess.run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command], check=True)
-        except (OSError, subprocess.CalledProcessError) as error:
-            print(f"[Vorbereitung] Ollama-Installation fehlgeschlagen: {error}", flush=True)
-            return None
-        return local if local.exists() else (Path(shutil.which("ollama")) if shutil.which("ollama") else None)
-    print("[Vorbereitung] Ollama fehlt. Unter Linux wird wegen der Vorgabe 'kein sudo' keine systemweite Installation ausgefuehrt.", flush=True)
-    print("[Vorbereitung] Lege eine benutzerlokale Ollama-Installation an und starte danach erneut.", flush=True)
-    return None
+def ensure_ollama_model() -> None:
+    """Run the project-local Ollama and make sure the configured model is complete and usable."""
+    model, base_url = configured_ollama_model(), configured_ollama_url()
+    if not model:
+        print("[Modelle] Kein Ollama-Modell konfiguriert; semantische Analyse bleibt deaktiviert.", flush=True); return
+    if request_json(f"{base_url}/api/tags") is None:
+        executable = ollama_executable()
+        if not executable:
+            print("[Modelle] Ollama ist nicht verfuegbar; Modell-Check uebersprungen.", flush=True); return
+        OLLAMA_MODELS.mkdir(parents=True, exist_ok=True)
+        SUPERVISOR.spawn("Ollama", [str(executable), "serve"], ROOT, {"OLLAMA_MODELS": str(OLLAMA_MODELS), "OLLAMA_HOST": base_url.split("//", 1)[-1]})
+        for _ in range(60):
+            time.sleep(.5)
+            if request_json(f"{base_url}/api/tags") is not None: break
+        else:
+            print("[Modelle] Ollama-Dienst konnte nicht gestartet werden.", flush=True); return
+    for attempt in range(1, 4):
+        available = {item.get("name") for item in (request_json(f"{base_url}/api/tags") or {}).get("models", [])}
+        if model in available or f"{model}:latest" in available:
+            print(f"[Modelle] Pruefe {model} (Ladetest) ...", flush=True)
+            if _model_answers(base_url, model):
+                print(f"[Modelle] Ollama-Modell bereit: {model} (in {OLLAMA_MODELS})", flush=True); return
+            print(f"[Modelle] {model} antwortet nicht; Pull prueft und ergaenzt fehlende Teile.", flush=True)
+        else:
+            print(f"[Modelle] Lade {model} nach {OLLAMA_MODELS} (Versuch {attempt}/3) ...", flush=True)
+        _pull_model(base_url, model)   # Ollama resumes partial blobs and verifies every digest
+    print(f"[Modelle] {model} konnte nicht vollstaendig bereitgestellt werden; naechster Start versucht es erneut.", flush=True)
 
 
 def discover_coordinator(port: int) -> str | None:
@@ -307,7 +373,7 @@ def monitor(url: str, interval: float, client_id: str, mode: str) -> None:
 
 
 def main() -> None:
-    if hasattr(sys.stdout, "reconfigure"): sys.stdout.reconfigure(line_buffering=True)
+    if hasattr(sys.stdout, "reconfigure"): sys.stdout.reconfigure(line_buffering=True, errors="replace")
     parser = argparse.ArgumentParser(description="Start or join SeriesAI and keep the live monitor visible.")
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", default=PORT, type=int)
