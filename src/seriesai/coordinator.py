@@ -124,7 +124,15 @@ class Coordinator:
                     voice_clusters_approved = connection.execute("SELECT COUNT(*) FROM voice_clusters WHERE status='approved'").fetchone()[0]
                 except sqlite3.OperationalError:
                     voice_clusters_total = voice_clusters_approved = 0   # older DB not yet migrated
-                queue_counts = {row[0]: row[1] for row in connection.execute("SELECT status,COUNT(*) FROM generation_job_items GROUP BY status")}
+                # Scope the progress/ETA summary to jobs that still have unfinished work: an old, fully
+                # cancelled test job's leftover 'completed' shots must not be counted into a different,
+                # currently rendering job's totals (they used to inflate "X / Y" and the ETA together).
+                active_job_ids = [row[0] for row in connection.execute("SELECT DISTINCT job_id FROM generation_job_items WHERE item_type='shot' AND status IN ('pending','retry','rendering')")]
+                if active_job_ids:
+                    placeholders = ",".join("?" * len(active_job_ids))
+                    queue_counts = {row[0]: row[1] for row in connection.execute(f"SELECT status,COUNT(*) FROM generation_job_items WHERE job_id IN ({placeholders}) GROUP BY status", active_job_ids)}
+                else:
+                    queue_counts = {row[0]: row[1] for row in connection.execute("SELECT status,COUNT(*) FROM generation_job_items GROUP BY status")}
                 rendering = connection.execute("SELECT job_id,sequence_number,worker_id,started_at,checkpoint_json FROM generation_job_items WHERE item_type='shot' AND status='rendering' ORDER BY started_at LIMIT 1").fetchone()
                 # Only the most recent completions: older shots may have used a different backend/resolution and would skew the estimate.
                 completed_durations = connection.execute("SELECT AVG(duration) FROM (SELECT (julianday(finished_at)-julianday(started_at))*86400 AS duration FROM generation_job_items WHERE item_type='shot' AND status='completed' AND finished_at IS NOT NULL AND started_at IS NOT NULL ORDER BY finished_at DESC LIMIT 20)").fetchone()[0]
