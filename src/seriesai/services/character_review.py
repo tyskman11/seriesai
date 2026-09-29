@@ -66,6 +66,42 @@ class CharacterReviewService:
             )
         return {"candidate_id": candidate_id, "character_id": character_id, "canonical_name": name, "status": "approved"}
 
+    def create_manual(self, series_id: str, character_id: str, canonical_name: str) -> dict:
+        """Add a canonical character directly, without an AI-proposed candidate (a human already recognized them)."""
+        if not self._IDENTITY.fullmatch(character_id):
+            raise ValueError("character_id must contain only lowercase letters, digits, and underscores.")
+        name = canonical_name.strip()
+        if not name:
+            raise ValueError("canonical_name cannot be empty.")
+        with self.database.connect() as connection:
+            if not connection.execute("SELECT 1 FROM series WHERE series_id=?", (series_id,)).fetchone():
+                raise ValueError(f"Unknown series: {series_id}")
+            if connection.execute("SELECT 1 FROM characters WHERE character_id=?", (character_id,)).fetchone():
+                raise ValueError("character_id is already in use.")
+            connection.execute("INSERT INTO characters(character_id,series_id,canonical_name) VALUES(?,?,?)", (character_id, series_id, name))
+            # A matching candidate_id=character_id keeps the manual character visible in the existing review list.
+            connection.execute(
+                "INSERT INTO character_candidates(candidate_id,series_id,canonical_name,aliases_json,role_description,confidence,evidence_json,status,source_signature,reviewed_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?)",
+                (character_id, series_id, name, "[]", "Manuell hinzugefuegt.", 1.0, json.dumps(["Manuell hinzugefuegt."], ensure_ascii=False), "approved", f"manual:{character_id}", datetime.now(timezone.utc).isoformat()),
+            )
+            connection.execute("INSERT OR IGNORE INTO character_aliases(character_id,alias) VALUES(?,?)", (character_id, name))
+        return {"character_id": character_id, "canonical_name": name, "status": "approved"}
+
+    def rename(self, character_id: str, canonical_name: str) -> dict:
+        """Rename an existing canonical character. The stable character_id never changes."""
+        name = canonical_name.strip()
+        if not name:
+            raise ValueError("canonical_name cannot be empty.")
+        with self.database.connect() as connection:
+            updated = connection.execute("UPDATE characters SET canonical_name=? WHERE character_id=?", (name, character_id)).rowcount
+            if not updated:
+                raise ValueError(f"Unknown character_id: {character_id}")
+            # Keep the review list's display name and the searchable aliases in sync.
+            connection.execute("UPDATE character_candidates SET canonical_name=? WHERE candidate_id=?", (name, character_id))
+            connection.execute("INSERT OR IGNORE INTO character_aliases(character_id,alias) VALUES(?,?)", (character_id, name))
+        return {"character_id": character_id, "canonical_name": name, "status": "renamed"}
+
     def reject(self, series_id: str, candidate_id: str) -> dict:
         with self.database.connect() as connection:
             updated = connection.execute(
