@@ -143,13 +143,16 @@ class VoiceIdentityService:
         return chosen
 
     def _cut(self, episode_id: str, start: float, end: float, target: Path, sample_rate: int) -> None:
+        if target.is_file() and target.stat().st_size > 0: return   # idempotent: reused by every dashboard poll
         with self.database.connect() as connection:
             audio = connection.execute("SELECT file_path FROM import_artifacts WHERE episode_id=? AND artifact_type='audio_16khz_mono' AND status='completed'", (episode_id,)).fetchone()
         target.parent.mkdir(parents=True, exist_ok=True)
-        subprocess.run([self.config.paths.ffmpeg, "-y", "-ss", f"{start:.3f}", "-t", f"{end - start:.3f}", "-i", str(project_path(self.config.paths.project_root, audio["file_path"])), "-ac", "1", "-ar", str(sample_rate), str(target)], check=True, capture_output=True, timeout=120)
+        temporary = target.with_suffix(".partial" + target.suffix)
+        subprocess.run([self.config.paths.ffmpeg, "-y", "-ss", f"{start:.3f}", "-t", f"{end - start:.3f}", "-i", str(project_path(self.config.paths.project_root, audio["file_path"])), "-ac", "1", "-ar", str(sample_rate), str(temporary)], check=True, capture_output=True, timeout=120)
+        temporary.replace(target)
 
     def review_clusters(self, series_id: str, samples: int = 4) -> list[dict]:
-        """List clusters with listening samples (Series/voice_review/<cluster>/)."""
+        """List clusters with listening samples (Series/voice_review/<cluster>/). Sample files are cut once (idempotent) and reused on every later call."""
         with self.database.connect() as connection:
             clusters = [dict(row) for row in connection.execute("SELECT cluster_id,character_id,segment_count,total_seconds,status FROM voice_clusters WHERE series_id=? ORDER BY cluster_id", (series_id,))]
         for cluster in clusters:

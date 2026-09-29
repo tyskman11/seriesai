@@ -361,3 +361,14 @@ python -m seriesai.cli synthesize-dialogue --character-id kenzie_001 --text "Hal
 ```
 
 The cleanest clips of each approved cluster become `Series/voices/<character_id>/ref_*.wav`, which XTTS clones.
+
+## Admin (coordinator) vs. worker: web UI roles
+
+The dashboard tells the coordinator machine from every other machine by itself, with no login. On first start, the coordinator writes a random `runtime/admin_token.txt`. `/admin/token` answers only a request that originates from the coordinator's own machine (127.0.0.1); the dashboard's browser fetches it automatically and, only then, shows an **ADMIN** badge and every mutating control (approve/reject characters, relationships, profiles, voice clusters; role changes; restarts). Opening the same dashboard from a worker PC's browser over the LAN always gets refused that token, shows a **WORKER (read-only)** badge, and every mutating control is hidden. All of this is also enforced on the server: every mutating endpoint checks the `X-SeriesAI-Admin` header against the real token and answers 403 without it, so a worker cannot act even by calling the API directly.
+
+## Original voices in generated episodes end-to-end
+
+1. `embed-voices` → `cluster-voices` → review and `assign-voice`/`reject-voice` in the dashboard's **Stimmen-Pruefung** section (admin only) → `build-voice-references`.
+2. `plan-episode` now also writes short German dialogue lines per scene (`dialogue: [{character_id, line}]`), spread round-robin over that scene's shots by `create-shot-queue`.
+3. After a shot queue finishes rendering, `mux-dialogue --job-id <id>` synthesizes each shot's lines with the assigned character's cloned XTTS voice and muxes them over the rendered clip (the clip's own LTX-generated audio is kept as `*.ltx_audio.mp4`). A shot with no dialogue, or whose speaker has no reviewed voice yet, is left untouched.
+4. `assemble-episode` concatenates the (now voice-dubbed) shots as before.

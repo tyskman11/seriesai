@@ -14,6 +14,11 @@ from ..db import Database
 from ..paths import project_relative
 
 
+class DialogueLine(BaseModel):
+    character_id: str = Field(min_length=1)
+    line: str = Field(min_length=1, max_length=400)
+
+
 class PlannedScene(BaseModel):
     sequence_number: int = Field(ge=1)
     location: str = Field(min_length=1)
@@ -21,6 +26,14 @@ class PlannedScene(BaseModel):
     duration_seconds: float = Field(gt=5, le=900)
     purpose: str = Field(min_length=1, max_length=800)
     conflict_or_turn: str = Field(min_length=1, max_length=800)
+    dialogue: list[DialogueLine] = Field(default_factory=list, max_length=40)
+
+    @model_validator(mode="after")
+    def dialogue_speakers_are_scene_characters(self) -> "PlannedScene":
+        unknown = {line.character_id for line in self.dialogue} - set(self.character_ids)
+        if unknown:
+            raise ValueError(f"Dialogue speakers must be in character_ids: {sorted(unknown)}")
+        return self
 
 
 class EpisodeOutline(BaseModel):
@@ -82,7 +95,9 @@ class EpisodePlannerService:
         normalized = []
         for scene in outline.scenes:
             normalized_ids = [names.get(str(value).strip().lower(), value) for value in scene.character_ids]
-            normalized.append(scene.model_copy(update={"character_ids": normalized_ids}))
+            normalized_dialogue = [line.model_copy(update={"character_id": names.get(str(line.character_id).strip().lower(), line.character_id)}) for line in scene.dialogue]
+            normalized_dialogue = [line for line in normalized_dialogue if line.character_id in normalized_ids]
+            normalized.append(scene.model_copy(update={"character_ids": normalized_ids, "dialogue": normalized_dialogue}))
         total = sum(scene.duration_seconds for scene in normalized)
         if total > 0 and abs(total - target_duration_seconds) > max(90, target_duration_seconds * .15):
             factor = target_duration_seconds / total
@@ -119,7 +134,11 @@ class EpisodePlannerService:
         prompt = (
             "Plane eine neue deutsche Serienepisode als strukturierten Entwurf. Das oberste JSON-Objekt MUSS "
             "genau title, logline, continuity_notes und scenes enthalten. Jedes Element in scenes MUSS genau "
-            "sequence_number, location, character_ids, duration_seconds, purpose und conflict_or_turn enthalten. "
+            "sequence_number, location, character_ids, duration_seconds, purpose, conflict_or_turn und dialogue enthalten. "
+            "dialogue ist eine Liste gesprochener Zeilen in Szenenreihenfolge; jede Zeile hat character_id (aus "
+            "character_ids der Szene) und line (kurzer, natuerlich gesprochener deutscher Satz im Ton der Serie, "
+            "keine Regieanweisungen, keine Anfuehrungszeichen). Schreibe fuer jede Szene mindestens 2 Zeilen, "
+            "insgesamt genug Zeilen, dass die Szene bei normalem Sprechtempo etwa ihre duration_seconds fuellt. "
             "Nutze ausschliesslich die "
             "genehmigten character_ids aus dem Kontext. Erfinde keine Figuren-IDs und widersprich keinem "
             "Ereignis. Dies ist ein Entwurf, keine kanonische Fortsetzung. Ziel: " + str(target_seconds) + " Sekunden.\n"

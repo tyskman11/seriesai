@@ -33,11 +33,18 @@ class ShotQueueService:
         items: list[dict] = []
         sequence = 0
         for scene in sorted(document["outline"]["scenes"], key=lambda item: item["sequence_number"]):
+            part_durations: list[float] = []
             remaining = float(scene["duration_seconds"])
-            part = 0
             while remaining > 0:
-                sequence += 1; part += 1
-                duration = min(5.0, remaining); remaining -= duration   # Wan2.2: 5 s clips (121 frames @ 24 fps)
+                duration = min(5.0, remaining); remaining -= duration   # Wan2.2/LTX: 5 s clips (121 frames @ 24 fps)
+                part_durations.append(duration)
+            # Distribute the scene's dialogue lines round-robin over its shots, so a
+            # long scene's lines spread across shots instead of piling on the first one.
+            dialogue_per_part: list[list[dict]] = [[] for _ in part_durations]
+            for index, line in enumerate(scene.get("dialogue", [])):
+                dialogue_per_part[index % len(part_durations)].append(line)
+            for part, (duration, lines) in enumerate(zip(part_durations, dialogue_per_part), start=1):
+                sequence += 1
                 seed = random.SystemRandom().randint(0, 2_147_483_647)
                 filename = f"shot_{sequence:04d}.mp4"
                 spec = {
@@ -46,7 +53,7 @@ class ShotQueueService:
                     "duration_seconds": duration, "location": scene["location"],
                     "character_ids": scene["character_ids"], "action": scene["purpose"],
                     "camera": "auto", "prompt": scene["purpose"] + " " + scene["conflict_or_turn"],
-                    "negative_prompt": WAN_NEGATIVE_PROMPT,
+                    "negative_prompt": WAN_NEGATIVE_PROMPT, "dialogue": lines,
                     "seed": seed, "backend": self.config.models.video_backend,
                     "fps": 24, "frame_count": max(9, round(duration * 24 / 8) * 8 + 1),
                     "output_prefix": f"seriesai/shot_{sequence:04d}_{seed}",
