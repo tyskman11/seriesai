@@ -671,10 +671,29 @@ setTimeout(wrapSections,800);setTimeout(wrapSections,2000);
     return Handler
 
 
+def resume_episode_pipeline(coordinator: "Coordinator") -> None:
+    """After a coordinator restart, continue an episode pipeline that was already rendering."""
+    try:
+        from .services.episode_pipeline import EpisodePipelineService
+        database = Database(Path.cwd() / "Series" / "series.db")
+        if not database.path.exists(): return
+        service = EpisodePipelineService(load_config(Path.cwd() / "config.yaml"), database)
+        with database.connect() as connection:
+            pending = connection.execute("SELECT 1 FROM generation_jobs WHERE job_type='episode_pipeline' AND status='running' LIMIT 1").fetchone()
+        if not pending: return
+        def report(stage: str, detail: dict) -> None:
+            with coordinator.lock: coordinator.background_job = {"kind": "generate_episode", "status": "running", "detail": json.dumps({"stage": stage, **detail}, ensure_ascii=False)}
+        coordinator.run_background("generate_episode", lambda: service.resume_pending(report))
+    except (OSError, sqlite3.Error):
+        pass
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(); parser.add_argument("--host", default="127.0.0.1"); parser.add_argument("--port", default=8765, type=int); args = parser.parse_args()
     start_discovery_responder(args.host, args.port)
-    ThreadingHTTPServer((args.host, args.port), handler_factory(Coordinator(args.host, args.port))).serve_forever()
+    coordinator = Coordinator(args.host, args.port)
+    threading.Timer(1.0, resume_episode_pipeline, args=(coordinator,)).start()
+    ThreadingHTTPServer((args.host, args.port), handler_factory(coordinator)).serve_forever()
 
 
 if __name__ == "__main__": main()

@@ -29,7 +29,7 @@ ollama:
   base_url: "http://127.0.0.1:11435"
   # Local German-capable analysis model (6.6 GB); runs on 6 GB VRAM with CPU offload.
   model: "qwen3.5:9b"
-  timeout_seconds: 180
+  timeout_seconds: 1200   # generous: CPU fallback under concurrent GPU render load is slow
 
 # Optional local ComfyUI API renderer. Keep video_backend null until a local
 # API workflow template has been exported and configured here.

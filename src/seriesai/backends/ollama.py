@@ -11,8 +11,10 @@ from .base import LLMBackend
 
 
 class OllamaBackend(LLMBackend):
-    def __init__(self, base_url: str, model: str, retries: int = 2) -> None:
-        self.base_url, self.model, self.retries = base_url.rstrip("/"), model, retries
+    def __init__(self, base_url: str, model: str, retries: int = 2, timeout_seconds: int = 1200) -> None:
+        # A large default: under GPU contention with a concurrent ComfyUI render, Ollama
+        # can fall back to slow CPU decoding for a multi-billion-parameter model.
+        self.base_url, self.model, self.retries, self.timeout_seconds = base_url.rstrip("/"), model, retries, timeout_seconds
 
     def generate(self, prompt: str, *, system: str | None = None) -> str:
         payload = {"model": self.model, "prompt": prompt, "stream": False, "think": False}
@@ -21,7 +23,7 @@ class OllamaBackend(LLMBackend):
 
     def _request(self, payload: dict[str, Any]) -> dict[str, Any]:
         request = Request(f"{self.base_url}/api/generate", data=json.dumps(payload).encode(), headers={"Content-Type": "application/json"})
-        with urlopen(request, timeout=300) as response:
+        with urlopen(request, timeout=self.timeout_seconds) as response:
             return json.loads(response.read())
 
     def structured_generate(self, prompt: str, schema: type[Any], *, system: str | None = None) -> Any:

@@ -67,7 +67,7 @@ class CharacterInventoryService:
             "Die evidence-Eintraege muessen konkrete Episoden-IDs oder kurze belegbare Hinweise enthalten.\n\n"
             + source[:110_000]
         )
-        output = OllamaBackend(self.config.ollama.base_url, self.config.ollama.model).structured_generate(
+        output = OllamaBackend(self.config.ollama.base_url, self.config.ollama.model, timeout_seconds=self.config.ollama.timeout_seconds).structured_generate(
             prompt, CharacterInventoryOutput, system="Du bist ein vorsichtiger deutscher Serienkontinuitaets-Archivist."
         )
         candidates = output.candidates or self._recurring_name_candidates(evidence)

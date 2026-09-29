@@ -39,7 +39,7 @@ class SemanticAnalysisService:
         self._stage(episode_id, "running", {})
         try:
             prompt = "Analysiere dieses deutsche Episodentranskript. Extrahiere nur belegbare, wichtige Serienereignisse. Erfinde keine Fakten.\n\n" + row[2][:120000]
-            output = OllamaBackend(self.config.ollama.base_url, self.config.ollama.model).structured_generate(prompt, SemanticOutput, system="Du bist ein praeziser Serienkontinuitaets-Analyst.")
+            output = OllamaBackend(self.config.ollama.base_url, self.config.ollama.model, timeout_seconds=self.config.ollama.timeout_seconds).structured_generate(prompt, SemanticOutput, system="Du bist ein praeziser Serienkontinuitaets-Analyst.")
             occurred_at = row[1] or datetime.now(timezone.utc).isoformat()
             with self.database.connect() as connection:
                 for event in output.events:

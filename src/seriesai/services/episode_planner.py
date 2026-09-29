@@ -145,7 +145,7 @@ class EpisodePlannerService:
             f"Idee: {idea}\nOptionale Hinweise: {notes or '-'}\n\nKOMPAKTER SERIES-BRAIN-KONTEXT:\n" + json.dumps(prompt_context, ensure_ascii=False)
         )
         try:
-            outline = OllamaBackend(self.config.ollama.base_url, self.config.ollama.model).structured_generate(prompt, EpisodeOutline, system="Du bist ein deutscher Serienautor mit strenger Kontinuitaetsdisziplin.")
+            outline = OllamaBackend(self.config.ollama.base_url, self.config.ollama.model, timeout_seconds=self.config.ollama.timeout_seconds).structured_generate(prompt, EpisodeOutline, system="Du bist ein deutscher Serienautor mit strenger Kontinuitaetsdisziplin.")
             outline = self.normalize_draft(outline, context, target_seconds)
             issues = self.validate(outline, context, target_seconds)
             directory = self.config.paths.series_root / "Generated" / "drafts" / job_id
