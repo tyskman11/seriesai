@@ -182,9 +182,11 @@ class VoiceIdentityService:
         (self.config.paths.series_root / "voice_review" / "index.html").write_text(page, encoding="utf-8")
 
     def assign_cluster(self, cluster_id: str, character_id: str) -> dict:
+        # A character's voice can legitimately land in several clusters (imperfect
+        # clustering, or genuinely different vocal registers), so more than one
+        # cluster may point at the same character_id; build_references() combines them.
         with self.database.connect() as connection:
             if not connection.execute("SELECT 1 FROM characters WHERE character_id=? AND active=1", (character_id,)).fetchone(): raise ValueError(f"Unknown approved character: {character_id}")
-            if connection.execute("SELECT 1 FROM voice_clusters WHERE character_id=? AND cluster_id<>?", (character_id, cluster_id)).fetchone(): raise ValueError("This character already has another voice cluster; reject it first.")
             changed = connection.execute("UPDATE voice_clusters SET character_id=?,status='approved' WHERE cluster_id=?", (character_id, cluster_id)).rowcount
         if not changed: raise ValueError(f"Unknown voice cluster: {cluster_id}")
         return {"cluster_id": cluster_id, "character_id": character_id, "status": "approved"}
@@ -196,20 +198,31 @@ class VoiceIdentityService:
 
     # -- references for the TTS backend --------------------------------------
     def build_references(self, series_id: str, clips: int = 6) -> list[dict]:
-        """Cut the cleanest clips (closest to the voice centre) of each approved character."""
+        """Cut the cleanest clips (closest to each voice centre) of every approved character.
+
+        A character can have several approved clusters; their clips are pooled
+        into one reference set instead of the later cluster overwriting the
+        earlier one's files.
+        """
         with self.database.connect() as connection:
             approved = [dict(row) for row in connection.execute("SELECT cluster_id,character_id FROM voice_clusters WHERE series_id=? AND status='approved' AND character_id IS NOT NULL", (series_id,))]
+        by_character: dict[str, list[str]] = {}
+        for row in approved: by_character.setdefault(row["character_id"], []).append(row["cluster_id"])
         results = []
-        for cluster in approved:
-            target_dir = self.config.paths.series_root / "voices" / cluster["character_id"]
+        for character_id, cluster_ids in by_character.items():
+            target_dir = self.config.paths.series_root / "voices" / character_id
             for stale in target_dir.glob("ref_*.wav"): stale.unlink()
-            segments = self._best_segments(cluster["cluster_id"], clips, min_seconds=4.0, max_seconds=11.0)
+            per_cluster = max(1, -(-clips // len(cluster_ids)))  # ceil, then trim the pooled list below
+            segments: list[dict] = []
+            for cluster_id in cluster_ids:
+                segments.extend(self._best_segments(cluster_id, per_cluster, min_seconds=4.0, max_seconds=11.0))
+            segments = segments[:clips]
             for index, segment in enumerate(segments, start=1):
                 self._cut(segment["episode_id"], segment["start_seconds"], segment["end_seconds"], target_dir / f"ref_{index:02d}.wav", 22050)
             with self.database.connect() as connection:
                 connection.execute(
                     "INSERT INTO voice_profiles(voice_profile_id,character_id,voice_identity,backend_name,reference_dir) VALUES(?,?,?,?,?) "
                     "ON CONFLICT(character_id) DO UPDATE SET backend_name=excluded.backend_name,reference_dir=excluded.reference_dir",
-                    (str(uuid.uuid4()), cluster["character_id"], cluster["character_id"], "xtts", project_relative(self.config.paths.project_root, target_dir)))
-            results.append({"character_id": cluster["character_id"], "cluster_id": cluster["cluster_id"], "reference_clips": len(segments), "reference_dir": str(target_dir)})
+                    (str(uuid.uuid4()), character_id, character_id, "xtts", project_relative(self.config.paths.project_root, target_dir)))
+            results.append({"character_id": character_id, "cluster_ids": cluster_ids, "reference_clips": len(segments), "reference_dir": str(target_dir)})
         return results
