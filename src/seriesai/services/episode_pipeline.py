@@ -65,25 +65,27 @@ class EpisodePipelineService:
                 report("planning")
                 plan = EpisodePlannerService(self.config, self.database).plan(series_id, idea, duration_minutes, notes)
                 outline_path = Path(plan["outline_path"])
-                report("continuity_check", outline_path=str(outline_path))
+                title = json.loads(outline_path.read_text(encoding="utf-8")).get("outline", {}).get("title", episode_code)
+                report("continuity_check", outline_path=str(outline_path), title=title)
                 continuity = ContinuityChecker().check_document(outline_path)
                 blocking = [issue for issue in continuity["issues"] if issue.get("severity") == "error"]
                 if blocking:
                     raise RuntimeError("Kontinuitaetsfehler blockieren die Episode: " + "; ".join(issue["description"] for issue in blocking))
-                report("creating_shot_queue", outline_path=str(outline_path))
+                report("creating_shot_queue", outline_path=str(outline_path), title=title)
                 queue = ShotQueueService(self.config, self.database).create(outline_path)
-                report("rendering", shot_job_id=queue["job_id"], shot_count=queue["shot_count"], counts=self._shot_counts(queue["job_id"]))
+                report("rendering", shot_job_id=queue["job_id"], shot_count=queue["shot_count"], counts=self._shot_counts(queue["job_id"]), title=title)
             shot_job_id = checkpoint["shot_job_id"]
+            title = checkpoint.get("title", episode_code)
 
             counts = self._shot_counts(shot_job_id)
-            report("rendering", shot_job_id=shot_job_id, shot_count=sum(counts.values()), counts=counts)  # report immediately, e.g. right after a resume
+            report("rendering", shot_job_id=shot_job_id, shot_count=sum(counts.values()), counts=counts, title=title)  # report immediately, e.g. right after a resume
             while True:
                 total = sum(counts.values())
                 done = sum(counts.get(status, 0) for status in TERMINAL_SHOT_STATUSES)
                 if total and done >= total: break
                 time.sleep(self.poll_seconds)
                 counts = self._shot_counts(shot_job_id)
-                report("rendering", shot_job_id=shot_job_id, shot_count=total, counts=counts)
+                report("rendering", shot_job_id=shot_job_id, shot_count=total, counts=counts, title=title)
             if counts.get("failed"):
                 raise RuntimeError(f"{counts['failed']} von {sum(counts.values())} Shots endgueltig fehlgeschlagen (shot_job_id {shot_job_id}); Episode wird nicht automatisch zusammengesetzt.")
             if counts.get("cancelled"):
