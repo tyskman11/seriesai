@@ -366,6 +366,20 @@ def handler_factory(coordinator: Coordinator):
                 except (KeyError, ValueError, OSError, sqlite3.Error) as error:
                     return self._json(400, {"error": str(error)})
             payload = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))) or b"{}")
+            if self.path == "/episode-pipeline/start":
+                if not self._require_admin(): return
+                try:
+                    from .services.episode_pipeline import EpisodePipelineService
+                    series_id, idea, episode_code = str(payload["series_id"]), str(payload["idea"]), str(payload["episode_code"])
+                    duration_minutes, notes = float(payload.get("duration_minutes", 22)), payload.get("notes")
+                    database = Database(Path.cwd() / "Series" / "series.db")
+                    service = EpisodePipelineService(load_config(Path.cwd() / "config.yaml"), database)
+                    def report(stage: str, detail: dict) -> None:
+                        with coordinator.lock: coordinator.background_job = {"kind": "generate_episode", "status": "running", "detail": json.dumps({"stage": stage, **detail}, ensure_ascii=False)}
+                    started = coordinator.run_background("generate_episode", lambda: service.run(series_id, idea, duration_minutes, episode_code, notes, report))
+                    return self._json(202 if started else 409, {"started": started})
+                except (KeyError, ValueError) as error:
+                    return self._json(400, {"error": str(error)})
             if self.path.startswith("/voice-clusters/"):
                 if not self._require_admin(): return
                 from .services.voice_identity import VoiceIdentityService
@@ -608,6 +622,15 @@ document.querySelectorAll('[data-voice-reject]').forEach(button=>button.onclick=
 }catch(e){document.getElementById('voiceStatus').textContent='Stimmen-Cluster konnten nicht geladen werden.'}}
 document.addEventListener('click',e=>{if(e.target.matches('[data-voice-embed]'))trigger('Embeddings','/voice-clusters/embed');if(e.target.matches('[data-voice-cluster]'))trigger('Gruppierung','/voice-clusters/cluster');if(e.target.matches('[data-voice-refs]'))trigger('Referenzclips','/voice-clusters/build-references')});
 loadVoices();setInterval(loadVoices,6000)})();</script>"""
+            page += """<script>(function(){const anchor=document.getElementById('nodes');anchor.insertAdjacentHTML('beforebegin','<h2>Episode generieren</h2><p class="muted">Plant eine neue Episode, prueft Kontinuitaet, legt die Shot-Queue an, wartet auf das lokale Rendern, mischt zugeordnete Stimmen ein und setzt am Ende episode.mp4 zusammen \\u2013 alles in einem Lauf. Dauert je nach Laenge Stunden; der Fortschritt steht unten.</p><p class="admin-only"><input id="episodeIdea" placeholder="Idee, z. B. Eine Figur baut einen Roboter" style="width:320px"> <input id="episodeDuration" type="number" value="22" min="1" max="120" style="width:70px" title="Ziel-Minuten"> min <input id="episodeCode" placeholder="Episodencode, z. B. S04E01" style="width:140px"> <button id="episodeStart">Episode generieren</button></p><p class="muted" id="episodePipelineStatus">Keine Episode wird gerade generiert.</p>');
+const seriesIdEp='game_shakers';
+document.getElementById('episodeStart').onclick=async()=>{const idea=document.getElementById('episodeIdea').value.trim(),code=document.getElementById('episodeCode').value.trim(),minutes=Number(document.getElementById('episodeDuration').value)||22;if(!idea||!code){alert('Idee und Episodencode sind erforderlich.');return}const r=await fetch('/episode-pipeline/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({series_id:seriesIdEp,idea,duration_minutes:minutes,episode_code:code})});if(r.status===409){alert('Es laeuft bereits eine Hintergrundaufgabe (Episode oder Stimmen). Erst abwarten.');return}if(!r.ok){alert((await r.json()).error||'Fehlgeschlagen');return}};
+async function episodeStatus(){try{const s=await fetch('/status',{cache:'no-store'}).then(r=>r.json()),job=s.background_job||{};const el=document.getElementById('episodePipelineStatus');if(job.kind!=='generate_episode'){el.textContent='Keine Episode wird gerade generiert.';return}
+if(job.status==='running'){let detail={};try{detail=JSON.parse(job.detail)}catch(e){}const stageNames={planning:'Plane Episode (Ollama)',continuity_check:'Pruefe Kontinuitaet',creating_shot_queue:'Lege Shot-Queue an',rendering:'Rendert Shots',dubbing:'Mische Stimmen ein',assembling:'Setzt Episode zusammen'};const counts=detail.counts?Object.entries(detail.counts).map(([k,v])=>k+': '+v).join(', '):'';el.textContent='Laeuft: '+(stageNames[detail.stage]||detail.stage||'...')+(counts?' ('+counts+')':'')}
+else if(job.status==='completed'){let detail={};try{detail=JSON.parse(job.detail)}catch(e){}el.textContent='Fertig: '+(detail.episode_path||job.detail)}
+else if(job.status==='failed'){el.textContent='Fehlgeschlagen: '+job.detail}
+}catch(e){}}
+episodeStatus();setInterval(episodeStatus,4000)})();</script>"""
             page += """<script>(function(){const anchor=document.getElementById('nodes');anchor.insertAdjacentHTML('beforebegin','<h2>Lokale Render-Bereitschaft</h2><p class="muted" id="renderReadiness">Pruefe ComfyUI und lokale Wan-Dateien …</p>');async function checkRender(){try{const p=(await fetch('/status',{cache:'no-store'}).then(r=>r.json())).pipeline||{},r=p.render_readiness||{};const models=[...(r.wan_models||[]),...(r.text_encoders||[]),...(r.vaes||[])];document.getElementById('renderReadiness').textContent=r.ready?'Bereit: lokaler ComfyUI-Renderer kann Queue-Shots ausfuehren.':('Status: '+(r.state||'unbekannt')+' · ComfyUI API: '+(r.api_online?'online':'offline')+' · Workflow: '+(r.workflow_configured?'konfiguriert':'nicht konfiguriert')+' · lokale Dateien: '+(models.join(', ')||'keine')+' · Naechster Schritt: '+(r.required_next_step||'–'));}catch(e){document.getElementById('renderReadiness').textContent='Render-Bereitschaft konnte nicht gelesen werden.'}}checkRender();setInterval(checkRender,5000)})();</script>"""
             page += """<script>(function(){
 function wrapSections(){

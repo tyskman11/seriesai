@@ -142,6 +142,13 @@ def main() -> None:
     voice_refs_parser.add_argument("--series-id", required=True)
     mux_parser = subparsers.add_parser("mux-dialogue", help="Synthesize and mux planned dialogue with cloned voices into a completed shot queue")
     mux_parser.add_argument("--job-id", required=True)
+    pipeline_parser = subparsers.add_parser("generate-episode", help="Plan, check continuity, queue, wait for rendering, dub with cloned voices, and assemble a finished episode in one call")
+    pipeline_parser.add_argument("--series-id", required=True)
+    pipeline_parser.add_argument("--idea", required=True)
+    pipeline_parser.add_argument("--duration-minutes", type=float, default=22)
+    pipeline_parser.add_argument("--episode-code", required=True)
+    pipeline_parser.add_argument("--notes")
+    pipeline_parser.add_argument("--poll-seconds", type=float, default=20.0)
     render_test_parser = subparsers.add_parser("render-self-test", help="Render one small local ComfyUI (LTX) verification shot without changing Series Brain")
     render_test_parser.add_argument("--prompt", default="eine ruhige filmische Einstellung eines leeren modernen Raums bei Abendlicht")
     render_test_parser.add_argument("--frames", type=int, default=9)
@@ -310,6 +317,14 @@ def main() -> None:
         counts = {}
         for item in results: counts[item.status] = counts.get(item.status, 0) + 1
         print(json.dumps({"job_id": args.job_id, "counts": counts}, ensure_ascii=False, indent=2))
+    elif args.command == "generate-episode":
+        from .services.episode_pipeline import EpisodePipelineService
+        db = Database(config.paths.series_root / "series.db")
+        db.initialize(config.paths.project_root / "backups" / "migrations")
+        def report(stage: str, detail: dict) -> None:
+            print(f"[Episode] {stage}: {json.dumps(detail, ensure_ascii=False)}", flush=True)
+        result = EpisodePipelineService(config, db, poll_seconds=args.poll_seconds).run(args.series_id, args.idea, args.duration_minutes, args.episode_code, args.notes, report)
+        print(json.dumps(result, ensure_ascii=False, indent=2))
     elif args.command == "prepare-character-reference-images":
         db = Database(config.paths.series_root / "series.db")
         db.initialize(config.paths.project_root / "backups" / "migrations")
