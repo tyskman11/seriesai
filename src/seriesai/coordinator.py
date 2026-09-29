@@ -126,10 +126,14 @@ class Coordinator:
                     voice_clusters_total = voice_clusters_approved = 0   # older DB not yet migrated
                 queue_counts = {row[0]: row[1] for row in connection.execute("SELECT status,COUNT(*) FROM generation_job_items GROUP BY status")}
                 rendering = connection.execute("SELECT job_id,sequence_number,worker_id,started_at,checkpoint_json FROM generation_job_items WHERE item_type='shot' AND status='rendering' ORDER BY started_at LIMIT 1").fetchone()
-                completed_durations = connection.execute("SELECT AVG((julianday(finished_at)-julianday(started_at))*86400) FROM generation_job_items WHERE item_type='shot' AND status='completed' AND finished_at IS NOT NULL AND started_at IS NOT NULL").fetchone()[0]
+                # Only the most recent completions: older shots may have used a different backend/resolution and would skew the estimate.
+                completed_durations = connection.execute("SELECT AVG(duration) FROM (SELECT (julianday(finished_at)-julianday(started_at))*86400 AS duration FROM generation_job_items WHERE item_type='shot' AND status='completed' AND finished_at IS NOT NULL AND started_at IS NOT NULL ORDER BY finished_at DESC LIMIT 20)").fetchone()[0]
                 avg = connection.execute("SELECT AVG((julianday(finished_at)-julianday(started_at))*86400) FROM analysis_runs WHERE stage_name='transcription' AND status='completed' AND finished_at IS NOT NULL").fetchone()[0]
             readiness = render_readiness(load_config(Path.cwd() / "config.yaml"))
-            total_shots = sum(queue_counts.values()); remaining = total_shots - queue_counts.get("completed", 0)
+            # A cancelled shot will never render; counting it as still-remaining work wildly inflates the ETA
+            # once old test/aborted jobs pile up in the same table.
+            active_counts = {status: count for status, count in queue_counts.items() if status != "cancelled"}
+            total_shots = sum(active_counts.values()); remaining = total_shots - active_counts.get("completed", 0)
             current_shot = None if not rendering else {"job_id": rendering[0], "sequence_number": rendering[1], "worker_id": rendering[2], "started_at": rendering[3], "specification": json.loads(rendering[4] or "{}")}
             return {"available": True, "episodes": total, "audio": audio, "scenes": scenes, "transcripts": transcripts, "active": active, "semantic_completed": semantic_completed, "semantic_failed": semantic_failed, "semantic_failures": semantic_failures, "character_candidates": candidate_count, "approved_characters": approved_character_count, "profile_proposals": profile_proposals, "relationship_proposals": relationship_proposals, "voice_clusters_total": voice_clusters_total, "voice_clusters_approved": voice_clusters_approved, "queue_counts": queue_counts, "current_shot": current_shot, "render_total_shots": total_shots, "render_eta_seconds": int(completed_durations * remaining) if completed_durations and remaining else None, "render_readiness": readiness, "transcription_eta_seconds": int(avg * (audio - transcripts)) if avg and audio > transcripts else None}
         except sqlite3.Error as error:
