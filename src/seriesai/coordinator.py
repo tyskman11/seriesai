@@ -328,7 +328,18 @@ def handler_factory(coordinator: Coordinator):
             if self.path == "/render-queue":
                 database = Path.cwd() / "Series" / "series.db"
                 with sqlite3.connect(database) as connection:
-                    rows = connection.execute("SELECT i.item_id,i.job_id,i.sequence_number,i.status,i.worker_id,i.attempts,i.error_message,i.checkpoint_json FROM generation_job_items i WHERE i.item_type='shot' ORDER BY CASE i.status WHEN 'rendering' THEN 0 WHEN 'retry' THEN 1 WHEN 'pending' THEN 2 ELSE 3 END,i.job_id,i.sequence_number LIMIT 200").fetchall()
+                    # Show only the job(s) that still have unfinished shots; once nothing is
+                    # active any more, fall back to the most recently created job so a just-
+                    # finished episode's shots stay visible instead of dumping every job ever.
+                    active_job_ids = [row[0] for row in connection.execute("SELECT DISTINCT job_id FROM generation_job_items WHERE item_type='shot' AND status IN ('pending','retry','rendering')")]
+                    if not active_job_ids:
+                        latest = connection.execute("SELECT job_id FROM generation_jobs WHERE job_type='draft_shot_queue' ORDER BY created_at DESC LIMIT 1").fetchone()
+                        active_job_ids = [latest[0]] if latest else []
+                    if active_job_ids:
+                        placeholders = ",".join("?" * len(active_job_ids))
+                        rows = connection.execute(f"SELECT i.item_id,i.job_id,i.sequence_number,i.status,i.worker_id,i.attempts,i.error_message,i.checkpoint_json FROM generation_job_items i WHERE i.item_type='shot' AND i.job_id IN ({placeholders}) ORDER BY i.job_id,i.sequence_number LIMIT 200", active_job_ids).fetchall()
+                    else:
+                        rows = []
                 return self._json(200, {"items": [{"item_id": row[0], "job_id": row[1], "sequence_number": row[2], "status": row[3], "worker_id": row[4], "attempts": row[5], "error_message": row[6], "specification": json.loads(row[7] or "{}") } for row in rows]})
             if self.path.startswith("/reference-image"):
                 candidate_id = parse_qs(urlparse(self.path).query).get("candidate_id", [""])[0]
