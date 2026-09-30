@@ -35,7 +35,7 @@ class FakeMuxResult:
 
 class FakePlanner:
     def __init__(self, config, database): self.database = database
-    def plan(self, series_id, idea, duration_minutes, notes):
+    def plan(self, series_id, idea, duration_minutes, notes, character_ids=None, crossover_series_id=None, crossover_character_ids=None):
         outline_path = self.database.path.parent / "outline.json"
         outline_path.write_text(json.dumps({"outline": {"title": "Der Testtitel"}}), encoding="utf-8")
         return {"outline_path": str(outline_path)}

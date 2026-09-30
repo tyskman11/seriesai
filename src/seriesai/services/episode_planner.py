@@ -55,17 +55,40 @@ class EpisodePlannerService:
     def __init__(self, config: AppConfig, database: Database) -> None:
         self.config, self.database = config, database
 
-    def context(self, series_id: str) -> dict:
+    def _series_characters(self, connection, series_id: str, character_ids: list[str] | None = None) -> list[dict]:
+        rows = connection.execute("SELECT character_id,canonical_name,apparent_age,life_stage FROM characters WHERE series_id=? AND active=1 ORDER BY canonical_name", (series_id,)).fetchall()
+        characters = [{**dict(row), "series_id": series_id} for row in rows]
+        if character_ids is not None:
+            known = {character["character_id"] for character in characters}
+            missing = set(character_ids) - known
+            if missing:
+                raise ValueError(f"Unknown or unapproved character_ids for {series_id}: {', '.join(sorted(missing))}")
+            characters = [character for character in characters if character["character_id"] in character_ids]
+        return characters
+
+    def context(self, series_id: str, character_ids: list[str] | None = None,
+                crossover_series_id: str | None = None, crossover_character_ids: list[str] | None = None) -> dict:
         with self.database.connect() as connection:
             series = connection.execute("SELECT series_id,title FROM series WHERE series_id=?", (series_id,)).fetchone()
             if not series:
                 raise ValueError(f"Unknown series: {series_id}")
-            characters = [dict(row) for row in connection.execute("SELECT character_id,canonical_name,apparent_age,life_stage FROM characters WHERE series_id=? AND active=1 ORDER BY canonical_name", (series_id,))]
+            characters = self._series_characters(connection, series_id, character_ids)
             events = [dict(row) for row in connection.execute("SELECT occurred_at,event_type,description,source_episode_id FROM world_events WHERE series_id=? ORDER BY occurred_at DESC LIMIT 30", (series_id,))]
             arcs = [dict(row) for row in connection.execute("SELECT title,description,priority FROM open_story_arcs WHERE series_id=? AND status='open' ORDER BY priority DESC LIMIT 20", (series_id,))]
             relationships = [dict(row) for row in connection.execute("SELECT a.canonical_name AS character_a,b.canonical_name AS character_b,h.trust,h.closeness,h.romantic_interest,h.conflict_level,h.respect,h.dependency,h.shared_history,h.reason FROM relationship_history h JOIN relationships r ON r.relationship_id=h.relationship_id JOIN characters a ON a.character_id=r.character_a_id JOIN characters b ON b.character_id=r.character_b_id WHERE r.series_id=? ORDER BY h.effective_at DESC LIMIT 40", (series_id,))]
             latest_episode = connection.execute("SELECT episode_id,season_number,episode_number,episode_date FROM episodes WHERE series_id=? ORDER BY season_number DESC,episode_number DESC LIMIT 1", (series_id,)).fetchone()
-        return {"series": dict(series), "characters": characters, "recent_events": events, "open_story_arcs": arcs, "relationship_history": relationships, "latest_episode": dict(latest_episode) if latest_episode else None}
+            crossover_series = None
+            if crossover_series_id:
+                crossover_row = connection.execute("SELECT series_id,title FROM series WHERE series_id=?", (crossover_series_id,)).fetchone()
+                if not crossover_row:
+                    raise ValueError(f"Unknown crossover series: {crossover_series_id}")
+                crossover_characters = self._series_characters(connection, crossover_series_id, crossover_character_ids)
+                if not crossover_characters:
+                    raise ValueError(f"No crossover characters selected for {crossover_series_id}.")
+                characters = characters + crossover_characters
+                crossover_series = {"series_id": crossover_row["series_id"], "title": crossover_row["title"], "characters": crossover_characters}
+        return {"series": dict(series), "characters": characters, "recent_events": events, "open_story_arcs": arcs, "relationship_history": relationships,
+                "latest_episode": dict(latest_episode) if latest_episode else None, "crossover_series": crossover_series}
 
     @staticmethod
     def validate(outline: EpisodeOutline, context: dict, target_duration_seconds: int) -> list[str]:
@@ -104,7 +127,8 @@ class EpisodePlannerService:
             normalized = [scene.model_copy(update={"duration_seconds": round(scene.duration_seconds * factor, 2)}) for scene in normalized]
         return outline.model_copy(update={"scenes": normalized})
 
-    def plan(self, series_id: str, idea: str, target_duration_minutes: float, notes: str | None = None, job_id: str | None = None) -> dict:
+    def plan(self, series_id: str, idea: str, target_duration_minutes: float, notes: str | None = None, job_id: str | None = None,
+             character_ids: list[str] | None = None, crossover_series_id: str | None = None, crossover_character_ids: list[str] | None = None) -> dict:
         if not self.config.ollama.model:
             raise RuntimeError("No local Ollama model configured.")
         if not idea.strip():
@@ -112,7 +136,7 @@ class EpisodePlannerService:
         target_seconds = int(target_duration_minutes * 60)
         if not 60 <= target_seconds <= 7200:
             raise ValueError("target duration must be between 1 and 120 minutes")
-        context = self.context(series_id)
+        context = self.context(series_id, character_ids, crossover_series_id, crossover_character_ids)
         if not context["characters"]:
             raise ValueError("At least one approved canonical character is required before planning an episode.")
         job_id = job_id or str(uuid.uuid4())
@@ -123,7 +147,7 @@ class EpisodePlannerService:
                 output = Path(checkpoint.get("outline_path", ""))
                 if output.is_file():
                     return {"job_id": job_id, "status": "already_planned", "outline_path": str(output), "issues": checkpoint.get("issues", [])}
-            payload = json.dumps({"idea": idea, "target_duration_minutes": target_duration_minutes, "notes": notes}, ensure_ascii=False)
+            payload = json.dumps({"idea": idea, "target_duration_minutes": target_duration_minutes, "notes": notes, "character_ids": character_ids, "crossover_series_id": crossover_series_id, "crossover_character_ids": crossover_character_ids}, ensure_ascii=False)
             connection.execute("INSERT INTO generation_jobs(job_id,series_id,job_type,status,payload_json,progress,attempts,updated_at) VALUES(?,?,?,'running',?,0.05,1,?) ON CONFLICT(job_id) DO UPDATE SET status='running',payload_json=excluded.payload_json,progress=.05,attempts=generation_jobs.attempts+1,updated_at=excluded.updated_at,error_message=NULL", (job_id, series_id, "episode_outline", payload, datetime.now(timezone.utc).isoformat()))
         # Keep the planning prompt compact.  Low-confidence transcript-derived
         # event summaries can otherwise drown out the user's new idea and make
@@ -131,6 +155,12 @@ class EpisodePlannerService:
         prompt_context = {"series": context["series"], "characters": context["characters"],
                           "open_story_arcs": context["open_story_arcs"], "relationship_history": context["relationship_history"],
                           "latest_episode": context["latest_episode"]}
+        crossover_note = ""
+        if context.get("crossover_series"):
+            guest_ids = [character["character_id"] for character in context["crossover_series"]["characters"]]
+            crossover_note = (f"Dies ist eine Crossover-Episode mit der Gastserie '{context['crossover_series']['title']}'. "
+                               f"Die folgenden character_ids sind Gastfiguren aus dieser Serie und treffen auf die Hauptfiguren: {', '.join(guest_ids)}. "
+                               "Erklaere kurz und plausibel im logline oder einer fruehen Szene, warum die Gastfiguren anwesend sind.\n")
         prompt = (
             "Plane eine neue deutsche Serienepisode als strukturierten Entwurf. Das oberste JSON-Objekt MUSS "
             "genau title, logline, continuity_notes und scenes enthalten. Jedes Element in scenes MUSS genau "
@@ -142,6 +172,7 @@ class EpisodePlannerService:
             "Nutze ausschliesslich die "
             "genehmigten character_ids aus dem Kontext. Erfinde keine Figuren-IDs und widersprich keinem "
             "Ereignis. Dies ist ein Entwurf, keine kanonische Fortsetzung. Ziel: " + str(target_seconds) + " Sekunden.\n"
+            + crossover_note +
             f"Idee: {idea}\nOptionale Hinweise: {notes or '-'}\n\nKOMPAKTER SERIES-BRAIN-KONTEXT:\n" + json.dumps(prompt_context, ensure_ascii=False)
         )
         try:

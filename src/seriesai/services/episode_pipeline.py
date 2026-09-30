@@ -50,9 +50,11 @@ class EpisodePipelineService:
             )
 
     def run(self, series_id: str, idea: str, duration_minutes: float, episode_code: str, notes: str | None = None,
-             progress: Callable[[str, dict], None] | None = None, job_id: str | None = None, resume_checkpoint: dict | None = None) -> dict:
+             progress: Callable[[str, dict], None] | None = None, job_id: str | None = None, resume_checkpoint: dict | None = None,
+             character_ids: list[str] | None = None, crossover_series_id: str | None = None, crossover_character_ids: list[str] | None = None) -> dict:
         job_id = job_id or str(uuid.uuid4())
-        payload = {"idea": idea, "duration_minutes": duration_minutes, "episode_code": episode_code, "notes": notes}
+        payload = {"idea": idea, "duration_minutes": duration_minutes, "episode_code": episode_code, "notes": notes,
+                   "character_ids": character_ids, "crossover_series_id": crossover_series_id, "crossover_character_ids": crossover_character_ids}
         checkpoint = dict(resume_checkpoint or {})
 
         def report(stage: str, **detail: object) -> None:
@@ -63,7 +65,8 @@ class EpisodePipelineService:
         try:
             if "shot_job_id" not in checkpoint:
                 report("planning")
-                plan = EpisodePlannerService(self.config, self.database).plan(series_id, idea, duration_minutes, notes)
+                plan = EpisodePlannerService(self.config, self.database).plan(series_id, idea, duration_minutes, notes,
+                                                                                character_ids=character_ids, crossover_series_id=crossover_series_id, crossover_character_ids=crossover_character_ids)
                 outline_path = Path(plan["outline_path"])
                 title = json.loads(outline_path.read_text(encoding="utf-8")).get("outline", {}).get("title", episode_code)
                 report("continuity_check", outline_path=str(outline_path), title=title)
@@ -126,4 +129,5 @@ class EpisodePipelineService:
             self._save(job_id, series_id, payload, checkpoint, "failed", error="Koordinator wurde neu gestartet, bevor die Shot-Queue angelegt war; bitte erneut starten.")
         if not resumable: return None
         job_id, series_id, payload, checkpoint = resumable
-        return self.run(series_id, payload["idea"], payload["duration_minutes"], payload["episode_code"], payload.get("notes"), progress, job_id=job_id, resume_checkpoint=checkpoint)
+        return self.run(series_id, payload["idea"], payload["duration_minutes"], payload["episode_code"], payload.get("notes"), progress, job_id=job_id, resume_checkpoint=checkpoint,
+                         character_ids=payload.get("character_ids"), crossover_series_id=payload.get("crossover_series_id"), crossover_character_ids=payload.get("crossover_character_ids"))
