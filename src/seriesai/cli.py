@@ -35,7 +35,7 @@ from .services.timeline import TimelineService
 from .services.episode_commit import EpisodeCommitService
 from .services.voice_synthesis import VoiceSynthesisService
 from .services.render_readiness import render_readiness
-from .backends.comfyui import ComfyUIWorkflowBackend, WAN_NEGATIVE_PROMPT
+from .backends.comfyui import ComfyUIWorkflowBackend, DEFAULT_NEGATIVE_PROMPT
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -91,6 +91,7 @@ def build_parser() -> argparse.ArgumentParser:
     voice_series_parser = subparsers.add_parser("extract-series-voice-candidates", help="Extract resumable voice clip candidates for a series")
     voice_series_parser.add_argument("--series-id", required=True)
     reference_parser = subparsers.add_parser("prepare-character-reference-images", help="Select one local face reference from evidence episodes for each character proposal")
+    reference_parser.add_argument("--force", action="store_true", help="Redetect and replace existing references (use after a face-detector fix or bad crops)")
     reference_parser.add_argument("--series-id", required=True)
     planner_parser = subparsers.add_parser("plan-episode", help="Create a local review-only episode outline from the Series Brain")
     planner_parser.add_argument("--series-id", required=True)
@@ -153,7 +154,7 @@ def build_parser() -> argparse.ArgumentParser:
     render_test_parser = subparsers.add_parser("render-self-test", help="Render one small local ComfyUI (LTX) verification shot without changing Series Brain")
     render_test_parser.add_argument("--prompt", default="eine ruhige filmische Einstellung eines leeren modernen Raums bei Abendlicht")
     render_test_parser.add_argument("--frames", type=int, default=9)
-    render_test_parser.add_argument("--output", type=Path, default=Path("Series/Generated/verification/wan_self_test.mp4"))
+    render_test_parser.add_argument("--output", type=Path, default=Path("Series/Generated/verification/render_self_test.mp4"))
     adopt_parser = subparsers.add_parser("adopt-rendered-shot", help="Safely adopt a completed local ComfyUI output for its reserved queue item")
     adopt_parser.add_argument("--item-id", required=True); adopt_parser.add_argument("--worker-id", required=True); adopt_parser.add_argument("--source", type=Path, required=True)
     return parser
@@ -334,7 +335,7 @@ def main() -> None:
     elif args.command == "prepare-character-reference-images":
         db = Database(config.paths.series_root / "series.db")
         db.initialize(config.paths.project_root / "backups" / "migrations")
-        print(json.dumps(CharacterReferenceImageService(config, db).create_for_series(args.series_id), ensure_ascii=False))
+        print(json.dumps(CharacterReferenceImageService(config, db).create_for_series(args.series_id, force=args.force), ensure_ascii=False))
     elif args.command == "plan-episode":
         db = Database(config.paths.series_root / "series.db")
         db.initialize(config.paths.project_root / "backups" / "migrations")
@@ -357,7 +358,7 @@ def main() -> None:
         readiness = render_readiness(config)
         if not readiness["ready"]: raise SystemExit("Local renderer is not ready: " + readiness["required_next_step"])
         output = args.output if args.output.is_absolute() else config.paths.project_root / args.output
-        spec = {"prompt": args.prompt, "negative_prompt": WAN_NEGATIVE_PROMPT, "seed": 424242, "duration_seconds": args.frames / 24, "fps": 24, "frame_count": args.frames, "output_prefix": "seriesai/wan_self_test", "output_path": project_relative(config.paths.project_root, output)}
+        spec = {"prompt": args.prompt, "negative_prompt": DEFAULT_NEGATIVE_PROMPT, "seed": 424242, "duration_seconds": args.frames / 24, "fps": 24, "frame_count": args.frames, "output_prefix": "seriesai/render_self_test", "output_path": project_relative(config.paths.project_root, output)}
         result = ComfyUIWorkflowBackend(config.comfyui_api, config.paths.comfyui, config.paths.project_root).render_shot(spec)
         print(json.dumps({"status": "rendered", "output_path": result, "frames": args.frames, "backend": "local_comfyui"}, ensure_ascii=False, indent=2))
     elif args.command == "adopt-rendered-shot":

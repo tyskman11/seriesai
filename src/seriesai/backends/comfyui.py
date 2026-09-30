@@ -15,7 +15,7 @@ from ..config import ComfyUIConfig
 
 
 # Wan's recommended negative prompt (English), plus series-specific guards.
-WAN_NEGATIVE_PROMPT = ("blurry, low quality, oversaturated, overexposed, static, still image, worst quality, jpeg artifacts, "
+DEFAULT_NEGATIVE_PROMPT = ("blurry, low quality, oversaturated, overexposed, static, still image, worst quality, jpeg artifacts, "
                        "ugly, deformed, disfigured, extra fingers, poorly drawn hands, poorly drawn face, extra limbs, fused fingers, "
                        "three legs, cluttered background, walking backwards, text, subtitles, watermark, logo")
 

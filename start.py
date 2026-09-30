@@ -374,6 +374,23 @@ def ensure_model_files() -> None:
                 print(f"[Modelle] {label}: {name} fehlgeschlagen; naechster Start setzt fort.", flush=True)
         else:
             print(f"[Modelle] {label} geprueft: {target}", flush=True)
+    ensure_face_detector_model()
+
+
+# opencv-python 5.x dropped cv2.CascadeClassifier/cv2.data.haarcascades; character-reference-image
+# face detection uses this small YuNet ONNX model instead (verified opencv_zoo release asset).
+YUNET_URL = "https://github.com/opencv/opencv_zoo/raw/main/models/face_detection_yunet/face_detection_yunet_2023mar.onnx"
+YUNET_SIZE, YUNET_SHA256 = 232589, "8f2383e4dd3cfbb4553ea8718107fc0423210dc964f9f4280604804ed2552fa4"
+YUNET_PATH = ROOT / "models" / "opencv" / "face_detection_yunet_2023mar.onnx"
+
+
+def ensure_face_detector_model() -> None:
+    if YUNET_PATH.is_file() and YUNET_PATH.stat().st_size == YUNET_SIZE and _sha256(YUNET_PATH) == YUNET_SHA256:
+        print(f"[Modelle] Gesichtserkennung (YuNet) geprueft: {YUNET_PATH}", flush=True); return
+    YUNET_PATH.unlink(missing_ok=True)
+    print("[Modelle] Gesichtserkennung (YuNet): lade face_detection_yunet_2023mar.onnx (227 KB) ...", flush=True)
+    if not download_verified(YUNET_URL, YUNET_PATH, YUNET_SIZE, YUNET_SHA256, "YuNet"):
+        print("[Modelle] Gesichtserkennung (YuNet): Download fehlgeschlagen; naechster Start setzt fort.", flush=True)
 
 
 def discover_coordinator(port: int) -> str | None:

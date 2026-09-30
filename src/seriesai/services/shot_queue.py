@@ -7,7 +7,7 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
-from ..backends.comfyui import WAN_NEGATIVE_PROMPT
+from ..backends.comfyui import DEFAULT_NEGATIVE_PROMPT
 from ..config import AppConfig
 from ..db import Database
 from ..paths import project_relative
@@ -53,7 +53,7 @@ class ShotQueueService:
                     "duration_seconds": duration, "location": scene["location"],
                     "character_ids": scene["character_ids"], "action": scene["purpose"],
                     "camera": "auto", "prompt": scene["purpose"] + " " + scene["conflict_or_turn"],
-                    "negative_prompt": WAN_NEGATIVE_PROMPT, "dialogue": lines,
+                    "negative_prompt": DEFAULT_NEGATIVE_PROMPT, "dialogue": lines,
                     "seed": seed, "backend": self.config.models.video_backend,
                     "fps": 24, "frame_count": max(9, round(duration * 24 / 8) * 8 + 1),
                     "output_prefix": f"seriesai/shot_{sequence:04d}_{seed}",
