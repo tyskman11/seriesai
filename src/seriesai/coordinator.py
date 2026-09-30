@@ -9,6 +9,7 @@ import threading
 import socket
 import sqlite3
 import sys
+import time
 import uuid
 from urllib.parse import parse_qs, urlparse
 from datetime import datetime, timezone
@@ -38,7 +39,10 @@ class Coordinator:
         self.workers: dict[str, dict] = {"master": {"name": os.environ.get("COMPUTERNAME") or "master", "platform": os.sys.platform, "role": master.get("role", "master-worker")}}
         self.lock = threading.Lock()
         self.admin_token = self._load_or_create_admin_token()
-        self.background_job: dict = {"kind": None, "status": "idle", "detail": ""}
+        # One slot per *kind* of task (not a single global slot): embed-voices, cluster-voices,
+        # build-voice-references and generate-episode can all run at the same time as long as no
+        # two of the *same* kind overlap (which would race on the same rows).
+        self.background_jobs: dict[str, dict] = {}
 
     def _load_or_create_admin_token(self) -> str:
         """One local-only admin token per project. Never sent over the network except as a header value."""
@@ -56,17 +60,21 @@ class Coordinator:
     def is_admin(self, presented_token: str | None) -> bool:
         return bool(presented_token) and hmac.compare_digest(presented_token, self.admin_token)
 
-    def run_background(self, kind: str, target) -> bool:
-        """Run one long admin action (embed/cluster/mux) at a time; status is polled from /status."""
+    def set_job(self, kind: str, status: str, detail) -> None:
         with self.lock:
-            if self.background_job["status"] == "running": return False
-            self.background_job = {"kind": kind, "status": "running", "detail": ""}
+            self.background_jobs[kind] = {"kind": kind, "status": status, "detail": detail if isinstance(detail, str) else json.dumps(detail, ensure_ascii=False)[:2000]}
+
+    def run_background(self, kind: str, target) -> bool:
+        """Run one admin task of this kind; a different kind can already be running at the same time."""
+        with self.lock:
+            if self.background_jobs.get(kind, {}).get("status") == "running": return False
+            self.background_jobs[kind] = {"kind": kind, "status": "running", "detail": ""}
         def runner() -> None:
             try:
                 detail = target()
-                with self.lock: self.background_job = {"kind": kind, "status": "completed", "detail": detail if isinstance(detail, str) else json.dumps(detail, ensure_ascii=False)[:2000]}
+                self.set_job(kind, "completed", detail)
             except Exception as error:
-                with self.lock: self.background_job = {"kind": kind, "status": "failed", "detail": str(error)[:2000]}
+                self.set_job(kind, "failed", str(error)[:2000])
         threading.Thread(target=runner, daemon=True).start()
         return True
 
@@ -96,7 +104,7 @@ class Coordinator:
     def status(self) -> dict:
         with self.lock:
             nodes = [{"id": worker_id, **worker} for worker_id, worker in self.workers.items()]
-            result = {"pid": os.getpid(), "workers": len(self.workers), "worker_nodes": nodes, "master": self.workers["master"]["name"], "restart_generation": self.restart_generation, "background_job": dict(self.background_job)}
+            result = {"pid": os.getpid(), "workers": len(self.workers), "worker_nodes": nodes, "master": self.workers["master"]["name"], "restart_generation": self.restart_generation, "background_jobs": dict(self.background_jobs)}
         result["pipeline"] = self._pipeline_status()
         return result
 
@@ -280,6 +288,10 @@ def handler_factory(coordinator: Coordinator):
                     return self._json(200, cli_jobs.status(self.path.removeprefix("/cli/jobs/").strip("/")))
                 except ValueError as error:
                     return self._json(404, {"error": str(error)})
+            if self.path == "/episode-pipeline/queue":
+                from .services.episode_pipeline import EpisodePipelineService
+                database = Database(Path.cwd() / "Series" / "series.db")
+                return self._json(200, {"queue": EpisodePipelineService(load_config(Path.cwd() / "config.yaml"), database).queue_snapshot()})
             if self.path == "/series":
                 with sqlite3.connect(Path.cwd() / "Series" / "series.db") as connection:
                     connection.row_factory = sqlite3.Row
@@ -426,11 +438,9 @@ def handler_factory(coordinator: Coordinator):
                     crossover_character_ids = [str(value) for value in payload["crossover_character_ids"]] if payload.get("crossover_character_ids") else None
                     database = Database(Path.cwd() / "Series" / "series.db")
                     service = EpisodePipelineService(load_config(Path.cwd() / "config.yaml"), database)
-                    def report(stage: str, detail: dict) -> None:
-                        with coordinator.lock: coordinator.background_job = {"kind": "generate_episode", "status": "running", "detail": json.dumps({"stage": stage, **detail}, ensure_ascii=False)}
-                    started = coordinator.run_background("generate_episode", lambda: service.run(series_id, idea, duration_minutes, episode_code, notes, report,
-                                                                                                    character_ids=character_ids, crossover_series_id=crossover_series_id, crossover_character_ids=crossover_character_ids))
-                    return self._json(202 if started else 409, {"started": started})
+                    result = service.enqueue(series_id, idea, duration_minutes, episode_code, notes,
+                                              character_ids=character_ids, crossover_series_id=crossover_series_id, crossover_character_ids=crossover_character_ids)
+                    return self._json(202, {"started": True, **result})
                 except (KeyError, ValueError) as error:
                     return self._json(400, {"error": str(error)})
             if self.path.startswith("/voice-clusters/"):
@@ -447,7 +457,7 @@ def handler_factory(coordinator: Coordinator):
                         return self._json(200, service.reject_cluster(cluster_id))
                     if self.path == "/voice-clusters/embed":
                         series_id = str(payload["series_id"])
-                        started = coordinator.run_background("embed_voices", lambda: service.embed_series(series_id))
+                        started = coordinator.run_background("embed_voices", lambda: [{"episode_id": r.episode_id, "embedded": r.embedded, "status": r.status} for r in service.embed_series(series_id)])
                         return self._json(202 if started else 409, {"started": started})
                     if self.path == "/voice-clusters/cluster":
                         series_id = str(payload["series_id"])
@@ -628,7 +638,7 @@ if(!(data.series||[]).some(s=>s.series_id===current)&&data.series&&data.series.l
 document.getElementById('seriesSelect').addEventListener('change',e=>{localStorage.setItem('seriesai_series',e.target.value);location.reload()});
 loadSeriesList();
 })();</script>"""
-            page += """<script>const byId=id=>document.getElementById(id);const safe=v=>String(v).replace(/[&<>\"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;',"'":'&#39;'}[c]));function perShotText(p){return p.render_seconds_per_shot==null?'':' (ø '+(p.render_seconds_per_shot<60?p.render_seconds_per_shot+'s':Math.round(p.render_seconds_per_shot/60)+'m')+'/Shot)'}async function refreshDashboard(){try{const s=await fetch('/status',{cache:'no-store'}).then(r=>{if(!r.ok)throw Error();return r.json()}),p=s.pipeline||{};byId('connection').className='online';byId('connection').textContent='ONLINE | Master '+s.master+' | PID '+s.pid;const etaSeconds=p.render_eta_seconds??p.transcription_eta_seconds;for(const [id,value] of Object.entries({pid:s.pid,workers:s.workers,episodes:p.episodes??'-',audio:p.audio??'-',scenes:p.scenes??'-',transcripts:p.transcripts??'-',eta:(etaSeconds==null?'-':Math.floor(etaSeconds/3600)+'h '+Math.floor(etaSeconds%3600/60)+'m')+(p.render_eta_seconds!=null?perShotText(p):'')}))byId(id).textContent=value;const job=s.background_job||{},ce=byId('currentEpisode');if(job.kind==='generate_episode'&&job.status==='running'){let d={};try{d=JSON.parse(job.detail||'{}')}catch(e){}const counts=d.counts||{},done=counts.completed||0,total=Object.values(counts).reduce((a,b)=>a+b,0);ce.style.display='';ce.innerHTML='🎬 Generiert: <b>'+safe(d.title||'Episode')+'</b> | '+done+' / '+(total||'?')+' Shots | ETA: '+(p.render_eta_seconds==null?'wird berechnet':Math.floor(p.render_eta_seconds/3600)+'h '+Math.floor(p.render_eta_seconds%3600/60)+'m'+perShotText(p))}else{ce.style.display='none'}byId('active').innerHTML=(p.active?.length?p.active.map(x=>'<li><b>'+safe(x.stage)+'</b> | '+safe(x.episode_id)+'</li>'):['<li class="muted">Keine aktive Aufgabe.</li>']).join('');byId('nodes').innerHTML=s.worker_nodes.map(x=>'<li><b>'+safe(x.name)+'</b> | '+safe(x.platform)+' | <select data-worker="'+safe(x.id)+'">'+['coordinator-only','coordinator-worker','worker'].filter(r=>x.id!=='master'||r!=='worker').map(r=>'<option '+(r===x.role?'selected':'')+' value="'+r+'">'+r+'</option>').join('')+'</select></li>').join('');document.querySelectorAll('[data-worker]').forEach(select=>select.onchange=async()=>{await fetch('/workers/'+encodeURIComponent(select.dataset.worker)+'/role',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({role:select.value})});refreshDashboard()})}catch(e){byId('connection').className='offline';byId('connection').textContent='OFFLINE | Koordinator ist gestoppt oder nicht erreichbar.'}}byId('restart').onclick=async()=>{await fetch('/control/restart',{method:'POST'});setTimeout(refreshDashboard,1300)};refreshDashboard();setInterval(refreshDashboard,3000)</script>"""
+            page += """<script>const byId=id=>document.getElementById(id);const safe=v=>String(v).replace(/[&<>\"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;',"'":'&#39;'}[c]));function perShotText(p){return p.render_seconds_per_shot==null?'':' (ø '+(p.render_seconds_per_shot<60?p.render_seconds_per_shot+'s':Math.round(p.render_seconds_per_shot/60)+'m')+'/Shot)'}async function refreshDashboard(){try{const s=await fetch('/status',{cache:'no-store'}).then(r=>{if(!r.ok)throw Error();return r.json()}),p=s.pipeline||{};byId('connection').className='online';byId('connection').textContent='ONLINE | Master '+s.master+' | PID '+s.pid;const etaSeconds=p.render_eta_seconds??p.transcription_eta_seconds;for(const [id,value] of Object.entries({pid:s.pid,workers:s.workers,episodes:p.episodes??'-',audio:p.audio??'-',scenes:p.scenes??'-',transcripts:p.transcripts??'-',eta:(etaSeconds==null?'-':Math.floor(etaSeconds/3600)+'h '+Math.floor(etaSeconds%3600/60)+'m')+(p.render_eta_seconds!=null?perShotText(p):'')}))byId(id).textContent=value;const job=(s.background_jobs||{}).generate_episode||{},ce=byId('currentEpisode');if(job.kind==='generate_episode'&&job.status==='running'){let d={};try{d=JSON.parse(job.detail||'{}')}catch(e){}const counts=d.counts||{},done=counts.completed||0,total=Object.values(counts).reduce((a,b)=>a+b,0);ce.style.display='';ce.innerHTML='🎬 Generiert: <b>'+safe(d.title||'Episode')+'</b> | '+done+' / '+(total||'?')+' Shots | ETA: '+(p.render_eta_seconds==null?'wird berechnet':Math.floor(p.render_eta_seconds/3600)+'h '+Math.floor(p.render_eta_seconds%3600/60)+'m'+perShotText(p))}else{ce.style.display='none'}byId('active').innerHTML=(p.active?.length?p.active.map(x=>'<li><b>'+safe(x.stage)+'</b> | '+safe(x.episode_id)+'</li>'):['<li class="muted">Keine aktive Aufgabe.</li>']).join('');byId('nodes').innerHTML=s.worker_nodes.map(x=>'<li><b>'+safe(x.name)+'</b> | '+safe(x.platform)+' | <select data-worker="'+safe(x.id)+'">'+['coordinator-only','coordinator-worker','worker'].filter(r=>x.id!=='master'||r!=='worker').map(r=>'<option '+(r===x.role?'selected':'')+' value="'+r+'">'+r+'</option>').join('')+'</select></li>').join('');document.querySelectorAll('[data-worker]').forEach(select=>select.onchange=async()=>{await fetch('/workers/'+encodeURIComponent(select.dataset.worker)+'/role',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({role:select.value})});refreshDashboard()})}catch(e){byId('connection').className='offline';byId('connection').textContent='OFFLINE | Koordinator ist gestoppt oder nicht erreichbar.'}}byId('restart').onclick=async()=>{await fetch('/control/restart',{method:'POST'});setTimeout(refreshDashboard,1300)};refreshDashboard();setInterval(refreshDashboard,3000)</script>"""
             page += """<script>const restartButton=document.getElementById('restart');restartButton.insertAdjacentHTML('afterend',' <button id="restartAll">Alle verbundenen Clients neu starten</button>');document.getElementById('restartAll').onclick=async()=>{const b=document.getElementById('restartAll');b.disabled=true;await fetch('/control/restart-all',{method:'POST'});setTimeout(()=>b.disabled=false,2500)}</script>"""
             page += """<script>(function(){const individual=document.getElementById('restart');const all=document.getElementById('restartAll');if(individual)individual.remove();if(!all)return;all.textContent='Alles neu starten';all.title='Startet Koordinator, WebUI und alle verbundenen Clients im selben Durchlauf neu.';all.onclick=async()=>{all.disabled=true;try{await fetch('/control/restart-all',{method:'POST'});}finally{setTimeout(()=>all.disabled=false,3000)}}})();</script>"""
             page += """<script>(function(){const grid=document.querySelector('.grid');grid.insertAdjacentHTML('beforeend','<div class="card"><small>Profilvorschlaege offen</small><div class="value" id="profileProposals">–</div></div><div class="card"><small>Beziehungsbelege offen</small><div class="value" id="relationshipProposals">–</div></div>');async function proposals(){try{const p=(await fetch('/status',{cache:'no-store'}).then(r=>r.json())).pipeline||{};document.getElementById('profileProposals').textContent=(p.profile_proposals??0)+' / '+(p.profile_proposals_total??0);document.getElementById('relationshipProposals').textContent=(p.relationship_proposals??0)+' / '+(p.relationship_proposals_total??0)}catch(e){}}proposals();setInterval(proposals,3000)})();</script>"""
@@ -668,10 +678,10 @@ detectAdmin();setInterval(detectAdmin,10000);
 const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const seriesId=curSeries();let characters=[];
 async function loadCharacters(){try{const data=await fetch('/characters?series_id='+seriesId,{cache:'no-store'}).then(r=>r.json());characters=data.characters||[]}catch(e){}}
-async function trigger(kind,path){try{const r=await fetch(path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({series_id:seriesId})});if(r.status===409){alert('Es laeuft bereits eine Hintergrundaufgabe.');return}if(!r.ok){alert((await r.json()).error||'Fehlgeschlagen');return}alert(kind+' laeuft jetzt im Hintergrund; Fortschritt siehe Statuszeile oben.')}catch(e){alert('Anfrage fehlgeschlagen.')}}
+async function trigger(kind,path){try{const r=await fetch(path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({series_id:seriesId})});if(r.status===409){alert('Dieser Schritt laeuft bereits im Hintergrund.');return}if(!r.ok){alert((await r.json()).error||'Fehlgeschlagen');return}alert(kind+' laeuft jetzt im Hintergrund; Fortschritt siehe Statuszeile oben.')}catch(e){alert('Anfrage fehlgeschlagen.')}}
 async function assign(clusterId,characterId){if(!characterId)return;const r=await fetch('/voice-clusters/'+encodeURIComponent(clusterId)+'/assign',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({character_id:characterId})});if(!r.ok)alert((await r.json()).error);loadVoices()}
 async function reject(clusterId){const r=await fetch('/voice-clusters/'+encodeURIComponent(clusterId)+'/reject',{method:'POST',headers:{'Content-Type':'application/json'}});if(!r.ok)alert((await r.json()).error);loadVoices()}
-async function loadVoices(){try{await loadCharacters();const s=await fetch('/status',{cache:'no-store'}).then(r=>r.json()),p=s.pipeline||{},job=s.background_job||{};const voiceJobRunning=job.status==='running'&&['embed_voices','cluster_voices','build_voice_references'].includes(job.kind);document.getElementById('voiceStatus').textContent=(p.voice_clusters_approved||0)+' von '+(p.voice_clusters_total||0)+' Stimmen zugeordnet.'+(voiceJobRunning?' Hintergrundaufgabe laeuft: '+job.kind+' ...':(job.status==='running'?' (Eine andere Hintergrundaufgabe laeuft gerade: '+job.kind+'; Embeddings/Gruppierung erst danach starten.)':''));if(Array.from(document.querySelectorAll('#voiceClusters audio')).some(a=>!a.paused))return;
+async function loadVoices(){try{await loadCharacters();const s=await fetch('/status',{cache:'no-store'}).then(r=>r.json()),p=s.pipeline||{},jobs=s.background_jobs||{};const runningVoiceJob=['embed_voices','cluster_voices','build_voice_references'].find(kind=>jobs[kind]&&jobs[kind].status==='running');document.getElementById('voiceStatus').textContent=(p.voice_clusters_approved||0)+' von '+(p.voice_clusters_total||0)+' Stimmen zugeordnet.'+(runningVoiceJob?' Hintergrundaufgabe laeuft: '+runningVoiceJob+' ...':'');if(Array.from(document.querySelectorAll('#voiceClusters audio')).some(a=>!a.paused))return;
 const data=await fetch('/voice-clusters?series_id='+seriesId,{cache:'no-store'}).then(r=>r.ok?r.json():{clusters:[]});
 const assignedCounts={};(data.clusters||[]).forEach(c=>{if(c.status==='approved'&&c.character_id)assignedCounts[c.character_id]=(assignedCounts[c.character_id]||0)+1});
 const options='<option value="">Figur waehlen ...</option>'+characters.map(c=>{const n=assignedCounts[c.character_id]||0;return '<option value="'+esc(c.character_id)+'">'+esc(c.canonical_name)+(n?' ('+n+(n===1?' Stimme':' Stimmen')+' zugeordnet)':'')+'</option>'}).join('');
@@ -685,7 +695,7 @@ document.querySelectorAll('[data-voice-reject]').forEach(button=>button.onclick=
 }catch(e){document.getElementById('voiceStatus').textContent='Stimmen-Cluster konnten nicht geladen werden.'}}
 document.addEventListener('click',e=>{if(e.target.matches('[data-voice-embed]'))trigger('Embeddings','/voice-clusters/embed');if(e.target.matches('[data-voice-cluster]'))trigger('Gruppierung','/voice-clusters/cluster');if(e.target.matches('[data-voice-refs]'))trigger('Referenzclips','/voice-clusters/build-references')});
 loadVoices();setInterval(loadVoices,6000)})();</script>"""
-            page += """<script>(function(){const anchor=document.getElementById('nodes');anchor.insertAdjacentHTML('beforebegin','<h2>Episode generieren</h2><p class="muted">Plant eine neue Episode, prueft Kontinuitaet, legt die Shot-Queue an, wartet auf das lokale Rendern, mischt zugeordnete Stimmen ein und setzt am Ende episode.mp4 zusammen - alles in einem Lauf. Dauert je nach Laenge Stunden; der Fortschritt steht unten.</p><div class="admin-only"><p><input id="episodeIdea" placeholder="Idee, z. B. Eine Figur baut einen Roboter" style="width:320px"> <input id="episodeDuration" type="number" value="22" min="1" max="120" style="width:70px" title="Ziel-Minuten"> min <input id="episodeCode" placeholder="Episodencode, z. B. S04E01" style="width:140px"></p><p class="muted">Figuren (leer = alle freigegebenen Figuren der Serie):</p><p id="episodeCharacters"></p><p><label><input type="checkbox" id="episodeCrossoverToggle"> Crossover mit einer anderen Serie</label></p><p id="episodeCrossoverBox" style="display:none">Gastserie: <select id="episodeCrossoverSeries"></select><br><span class="muted">Gastfiguren:</span> <span id="episodeCrossoverCharacters"></span></p><p><button id="episodeStart">Episode generieren</button></p></div><p class="muted" id="episodePipelineStatus">Keine Episode wird gerade generiert.</p>');
+            page += """<script>(function(){const anchor=document.getElementById('nodes');anchor.insertAdjacentHTML('beforebegin','<h2>Episode generieren</h2><p class="muted">Plant eine neue Episode, prueft Kontinuitaet, legt die Shot-Queue an, wartet auf das lokale Rendern, mischt zugeordnete Stimmen ein und setzt am Ende episode.mp4 zusammen - alles in einem Lauf. Dauert je nach Laenge Stunden; der Fortschritt steht unten.</p><div class="admin-only"><p><input id="episodeIdea" placeholder="Idee, z. B. Eine Figur baut einen Roboter" style="width:320px"> <input id="episodeDuration" type="number" value="22" min="1" max="120" style="width:70px" title="Ziel-Minuten"> min <input id="episodeCode" placeholder="Episodencode, z. B. S04E01" style="width:140px"></p><p class="muted">Figuren (leer = alle freigegebenen Figuren der Serie):</p><p id="episodeCharacters"></p><p><label><input type="checkbox" id="episodeCrossoverToggle"> Crossover mit einer anderen Serie</label></p><p id="episodeCrossoverBox" style="display:none">Gastserie: <select id="episodeCrossoverSeries"></select><br><span class="muted">Gastfiguren:</span> <span id="episodeCrossoverCharacters"></span></p><p><button id="episodeStart">Episode generieren</button></p></div><p class="muted" id="episodePipelineStatus">Keine Episode wird gerade generiert.</p><h3>Warteschlange</h3><ul id="episodeQueueList"></ul>');
 const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 async function loadEpisodeCharacters(){
   const series=curSeries();
@@ -715,15 +725,22 @@ document.getElementById('episodeStart').onclick=async()=>{
     payload.crossover_series_id=crossoverSeriesId;payload.crossover_character_ids=crossoverIds;
   }
   const r=await fetch('/episode-pipeline/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
-  if(r.status===409){alert('Es laeuft bereits eine Hintergrundaufgabe (Episode oder Stimmen). Erst abwarten.');return}
   if(!r.ok){alert((await r.json()).error||'Fehlgeschlagen');return}
+  const data=await r.json();
+  alert('Episode "'+code+'" zur Warteschlange hinzugefuegt (Position '+data.position+'). Sie startet automatisch, sobald sie an der Reihe ist.');
+  document.getElementById('episodeIdea').value='';document.getElementById('episodeCode').value='';
+  loadQueue();
 };
-async function episodeStatus(){try{const s=await fetch('/status',{cache:'no-store'}).then(r=>r.json()),job=s.background_job||{};const el=document.getElementById('episodePipelineStatus');if(job.kind!=='generate_episode'){el.textContent='Keine Episode wird gerade generiert.';return}
-if(job.status==='running'){let detail={};try{detail=JSON.parse(job.detail)}catch(e){}const stageNames={planning:'Plane Episode (Ollama)',continuity_check:'Pruefe Kontinuitaet',creating_shot_queue:'Lege Shot-Queue an',rendering:'Rendert Shots',dubbing:'Mische Stimmen ein',assembling:'Setzt Episode zusammen'};const counts=detail.counts?Object.entries(detail.counts).map(([k,v])=>k+': '+v).join(', '):'';el.textContent='Laeuft: '+(stageNames[detail.stage]||detail.stage||'...')+(counts?' ('+counts+')':'')}
-else if(job.status==='completed'){let detail={};try{detail=JSON.parse(job.detail)}catch(e){}el.textContent='Fertig: '+(detail.episode_path||job.detail)}
-else if(job.status==='failed'){el.textContent='Fehlgeschlagen: '+job.detail}
+const stageNames={queued:'Wartet in der Warteschlange',planning:'Plane Episode (Ollama)',continuity_check:'Pruefe Kontinuitaet',creating_shot_queue:'Lege Shot-Queue an',rendering:'Rendert Shots',dubbing:'Mische Stimmen ein',assembling:'Setzt Episode zusammen',completed:'Fertig',failed:'Fehlgeschlagen'};
+async function loadQueue(){try{
+  const items=(await fetch('/episode-pipeline/queue',{cache:'no-store'}).then(r=>r.json())).queue||[];
+  const running=items.filter(i=>i.status==='running'),queued=items.filter(i=>i.status==='pending'),recent=items.filter(i=>i.status!=='running'&&i.status!=='pending').slice(0,5);
+  document.getElementById('episodePipelineStatus').textContent=running.length?'':'Keine Episode wird gerade generiert.'+(queued.length?' '+queued.length+' in der Warteschlange.':'');
+  const row=(item,index)=>{const counts=item.counts?Object.entries(item.counts).map(([k,v])=>k+': '+v).join(', '):'';
+    return '<li><b>'+esc(item.episode_code||item.job_id)+'</b> ('+esc(item.series_id)+') · '+esc(stageNames[item.stage]||item.status)+(counts?' · '+esc(counts):'')+(item.error?' · <span style="color:#ff9b9b">'+esc(item.error.slice(0,200))+'</span>':'')+(index!=null?' · Position '+(index+1):'')+'</li>'};
+  document.getElementById('episodeQueueList').innerHTML=[...running.map(i=>row(i)),...queued.map((i,index)=>row(i,index)),...recent.map(i=>row(i))].join('')||'<li class="muted">Noch keine Episode angefragt.</li>';
 }catch(e){}}
-loadEpisodeCharacters();episodeStatus();setInterval(episodeStatus,4000)})();</script>"""
+loadEpisodeCharacters();loadQueue();setInterval(loadQueue,4000)})();</script>"""
             page += """<script>(function(){const anchor=document.getElementById('nodes');anchor.insertAdjacentHTML('beforebegin','<h2>Terminal</h2><p class="muted">Alle Terminal-Befehle (seriesai.cli), direkt aus dem Dashboard. Ein Befehl laeuft als Hintergrundprozess; die Ausgabe erscheint unten live.</p><div class="admin-only"><p>Befehl: <select id="cliCommand" style="min-width:280px"></select></p><p id="cliArgs"></p><p><button id="cliRun">Ausfuehren</button></p></div><p class="muted" id="cliRunStatus"></p><pre id="cliLog" style="max-height:320px;overflow:auto;background:#0b0f16;padding:.8rem;border-radius:8px;font-size:.8rem;white-space:pre-wrap"></pre><h3>Letzte Befehle</h3><ul id="cliHistory"></ul>');
 const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 let commands=[],pollTimer=null;
@@ -839,28 +856,28 @@ setTimeout(buildTabs,2500);setTimeout(buildTabs,4500);
     return Handler
 
 
-def resume_episode_pipeline(coordinator: "Coordinator") -> None:
-    """After a coordinator restart, continue an episode pipeline that was already rendering."""
-    try:
-        from .services.episode_pipeline import EpisodePipelineService
-        database = Database(Path.cwd() / "Series" / "series.db")
-        if not database.path.exists(): return
-        service = EpisodePipelineService(load_config(Path.cwd() / "config.yaml"), database)
-        with database.connect() as connection:
-            pending = connection.execute("SELECT 1 FROM generation_jobs WHERE job_type='episode_pipeline' AND status='running' LIMIT 1").fetchone()
-        if not pending: return
-        def report(stage: str, detail: dict) -> None:
-            with coordinator.lock: coordinator.background_job = {"kind": "generate_episode", "status": "running", "detail": json.dumps({"stage": stage, **detail}, ensure_ascii=False)}
-        coordinator.run_background("generate_episode", lambda: service.resume_pending(report))
-    except (OSError, sqlite3.Error):
-        pass
+def run_episode_queue(coordinator: "Coordinator") -> None:
+    """One persistent worker thread: resumes an in-flight episode after a restart, then
+    works through the queue for as long as the coordinator runs. Started once at startup."""
+    while True:
+        try:
+            database = Path.cwd() / "Series" / "series.db"
+            if not database.exists():
+                time.sleep(5); continue
+            from .services.episode_pipeline import EpisodePipelineService
+            service = EpisodePipelineService(load_config(Path.cwd() / "config.yaml"), Database(database))
+            def report(stage: str, detail: dict) -> None:
+                coordinator.set_job("generate_episode", "running", {"stage": stage, **detail})
+            service.run_forever(report)
+        except Exception:
+            time.sleep(5)  # keep the queue worker alive even if one iteration raises unexpectedly
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(); parser.add_argument("--host", default="127.0.0.1"); parser.add_argument("--port", default=8765, type=int); args = parser.parse_args()
     start_discovery_responder(args.host, args.port)
     coordinator = Coordinator(args.host, args.port)
-    threading.Timer(1.0, resume_episode_pipeline, args=(coordinator,)).start()
+    threading.Thread(target=run_episode_queue, args=(coordinator,), daemon=True).start()
     ThreadingHTTPServer((args.host, args.port), handler_factory(coordinator)).serve_forever()
 
 

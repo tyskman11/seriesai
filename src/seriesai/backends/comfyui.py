@@ -29,7 +29,7 @@ class ComfyUIWorkflowBackend(VideoBackend):
     ``output_path`` only after its API reports success.
     """
     # Low-VRAM resolution (divisible by 32 for LTX); a shot spec may override it.
-    RENDER_DEFAULTS = {"width": 704, "height": 384}
+    RENDER_DEFAULTS = {"width": 768, "height": 448}
 
     def __init__(self, config: ComfyUIConfig, comfyui_root: Path, project_root: Path) -> None:
         if not config.workflow_template:

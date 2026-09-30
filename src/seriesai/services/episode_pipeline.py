@@ -131,3 +131,60 @@ class EpisodePipelineService:
         job_id, series_id, payload, checkpoint = resumable
         return self.run(series_id, payload["idea"], payload["duration_minutes"], payload["episode_code"], payload.get("notes"), progress, job_id=job_id, resume_checkpoint=checkpoint,
                          character_ids=payload.get("character_ids"), crossover_series_id=payload.get("crossover_series_id"), crossover_character_ids=payload.get("crossover_character_ids"))
+
+    def enqueue(self, series_id: str, idea: str, duration_minutes: float, episode_code: str, notes: str | None = None,
+                character_ids: list[str] | None = None, crossover_series_id: str | None = None, crossover_character_ids: list[str] | None = None) -> dict:
+        """Add an episode request to the queue; run_forever() picks it up once free. Never blocks or rejects."""
+        job_id = str(uuid.uuid4())
+        payload = {"idea": idea, "duration_minutes": duration_minutes, "episode_code": episode_code, "notes": notes,
+                   "character_ids": character_ids, "crossover_series_id": crossover_series_id, "crossover_character_ids": crossover_character_ids}
+        # 'pending' doubles as "queued": the schema's status values predate this queue and have no separate state for it.
+        self._save(job_id, series_id, payload, {"stage": "queued"}, "pending")
+        return {"job_id": job_id, "position": self.queue_position(job_id)}
+
+    def queue_position(self, job_id: str) -> int:
+        """1 = next in line (or already running); 0 if not found/not queued."""
+        with self.database.connect() as connection:
+            rows = connection.execute("SELECT job_id FROM generation_jobs WHERE job_type='episode_pipeline' AND status IN ('running','pending') ORDER BY CASE status WHEN 'running' THEN 0 ELSE 1 END,created_at").fetchall()
+        ids = [row[0] for row in rows]
+        return ids.index(job_id) + 1 if job_id in ids else 0
+
+    def queue_snapshot(self, limit: int = 20) -> list[dict]:
+        with self.database.connect() as connection:
+            rows = connection.execute(
+                "SELECT job_id,series_id,status,payload_json,checkpoint_json,created_at,updated_at,error_message FROM generation_jobs WHERE job_type='episode_pipeline' "
+                "ORDER BY CASE status WHEN 'running' THEN 0 WHEN 'pending' THEN 1 ELSE 2 END,"
+                "CASE WHEN status IN ('running','pending') THEN created_at END ASC,"
+                "CASE WHEN status NOT IN ('running','pending') THEN updated_at END DESC LIMIT ?", (limit,)).fetchall()
+        results = []
+        for row in rows:
+            payload, checkpoint = json.loads(row["payload_json"] or "{}"), json.loads(row["checkpoint_json"] or "{}")
+            results.append({"job_id": row["job_id"], "series_id": row["series_id"], "status": row["status"], "episode_code": payload.get("episode_code"), "idea": payload.get("idea"),
+                             "title": checkpoint.get("title"), "stage": checkpoint.get("stage"), "counts": checkpoint.get("counts"),
+                             "created_at": row["created_at"], "updated_at": row["updated_at"], "error": row["error_message"]})
+        return results
+
+    def _next_runnable(self) -> tuple[str, str, dict, dict] | None:
+        with self.database.connect() as connection:
+            running = connection.execute("SELECT job_id,series_id,payload_json,checkpoint_json FROM generation_jobs WHERE job_type='episode_pipeline' AND status='running' ORDER BY updated_at DESC LIMIT 1").fetchone()
+            if running: return running["job_id"], running["series_id"], json.loads(running["payload_json"] or "{}"), json.loads(running["checkpoint_json"] or "{}")
+            queued = connection.execute("SELECT job_id,series_id,payload_json FROM generation_jobs WHERE job_type='episode_pipeline' AND status='pending' ORDER BY created_at LIMIT 1").fetchone()
+            if queued: return queued["job_id"], queued["series_id"], json.loads(queued["payload_json"] or "{}"), {}
+        return None
+
+    def run_forever(self, progress: Callable[[str, dict], None] | None = None, poll_seconds: float = 3.0) -> None:
+        """One persistent worker: resumes an in-flight job, then works through the queue, forever.
+
+        Only one episode renders at a time (the local GPU is the bottleneck), but
+        any number of requests can queue up without being rejected.
+        """
+        while True:
+            item = self._next_runnable()
+            if not item:
+                time.sleep(poll_seconds); continue
+            job_id, series_id, payload, checkpoint = item
+            try:
+                self.run(series_id, payload["idea"], payload["duration_minutes"], payload["episode_code"], payload.get("notes"), progress, job_id=job_id, resume_checkpoint=checkpoint,
+                         character_ids=payload.get("character_ids"), crossover_series_id=payload.get("crossover_series_id"), crossover_character_ids=payload.get("crossover_character_ids"))
+            except Exception:
+                pass  # already recorded on the job row by run(); move on to the next queued episode

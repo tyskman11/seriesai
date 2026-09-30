@@ -156,7 +156,9 @@ class Supervisor:
 
 SUPERVISOR = Supervisor()
 COMFYUI_URL = "http://127.0.0.1:8188"
-COMFYUI_ARGS = ["--windows-standalone-build", "--enable-manager", "--lowvram", "--reserve-vram", "1"]
+# --disable-auto-launch: the portable build otherwise opens a browser tab on its own; the
+# terminal's persistent link (see monitor()) is enough.
+COMFYUI_ARGS = ["--windows-standalone-build", "--disable-auto-launch", "--enable-manager", "--lowvram", "--reserve-vram", "1"]
 
 
 def configured_comfyui_root() -> Path | None:
@@ -393,9 +395,10 @@ def human_duration(seconds: int | None) -> str:
 
 
 def monitor(url: str, interval: float, client_id: str, mode: str) -> None:
-    print(f"\nDashboard: {url}/")
+    links = f"Dashboard: {url}/" + (f"  |  ComfyUI: {COMFYUI_URL}/" if configured_video_backend() == "comfyui" else "")
+    print(f"\n{links}")
     print(f"Dieser Rechner: {mode}")
-    print("Live-Monitor aktiv. Alle Dienste laufen in diesem Terminal. Strg+C beendet sie alle.\n")
+    print("Kein Fenster oeffnet sich automatisch; die Links oben bleiben stehen. Live-Monitor aktiv, alle Dienste laufen in diesem Terminal. Strg+C beendet sie alle.\n")
     restart_generation: int | None = None
     try:
         while True:
@@ -418,7 +421,7 @@ def monitor(url: str, interval: float, client_id: str, mode: str) -> None:
                 counts = pipeline.get("queue_counts", {}); shot = pipeline.get("current_shot") or {}
                 render = f"Render {counts.get('completed', 0)}/{pipeline.get('render_total_shots', 0)}"
                 if shot: render += f" · Shot {shot.get('sequence_number')} · {shot.get('worker_id', 'unbekannter Worker')}"
-                print(f"[{stamp}] Eigene Rolle: {own_role} | Verbundene Clients: {status.get('workers', 0)} | Transkripte {pipeline.get('transcripts', 0)}/{pipeline.get('audio', 0)} | Szenen {pipeline.get('scenes', 0)}/{pipeline.get('episodes', 0)} | {render} | Render-ETA {human_duration(pipeline.get('render_eta_seconds'))}\n           Jetzt: {current}", flush=True)
+                print(f"[{stamp}] Eigene Rolle: {own_role} | Verbundene Clients: {status.get('workers', 0)} | Transkripte {pipeline.get('transcripts', 0)}/{pipeline.get('audio', 0)} | Szenen {pipeline.get('scenes', 0)}/{pipeline.get('episodes', 0)} | {render} | Render-ETA {human_duration(pipeline.get('render_eta_seconds'))}\n           Jetzt: {current}\n           {links}", flush=True)
             time.sleep(interval)
     except KeyboardInterrupt:
         print("\nBeende alle SeriesAI-Dienste ...", flush=True)
