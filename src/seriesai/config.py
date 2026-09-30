@@ -46,6 +46,9 @@ class ComfyUIConfig(BaseModel):
     """Local ComfyUI API settings; no remote endpoint is accepted by policy."""
     api_url: str = "http://127.0.0.1:8188"
     workflow_template: Path | None = None
+    # Used instead of workflow_template whenever a shot has a reference_image (a real face
+    # crop of its character), so generated people actually resemble the original cast.
+    img2video_workflow_template: Path | None = None
     poll_seconds: float = Field(default=2.0, ge=.2, le=30)
     timeout_seconds: int = Field(default=7200, ge=30)
 
@@ -88,6 +91,8 @@ def load_config(path: Path | str) -> AppConfig:
     config.paths.comfyui = _resolve_path(config.paths.project_root, config.paths.comfyui)
     if config.comfyui_api.workflow_template:
         config.comfyui_api.workflow_template = _resolve_path(config.paths.project_root, config.comfyui_api.workflow_template)
+    if config.comfyui_api.img2video_workflow_template:
+        config.comfyui_api.img2video_workflow_template = _resolve_path(config.paths.project_root, config.comfyui_api.img2video_workflow_template)
     if config.piper.models_root:
         config.piper.models_root = _resolve_path(config.paths.project_root, config.piper.models_root)
     return config

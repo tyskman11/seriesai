@@ -64,6 +64,20 @@ class CharacterReviewService:
                 "UPDATE character_candidates SET status='approved', reviewed_at=? WHERE candidate_id=?",
                 (datetime.now(timezone.utc).isoformat(), candidate_id),
             )
+            # Copy the candidate's reviewed face crop to a character_id-keyed reference, so it
+            # can still be found once candidate_id and character_id have nothing else in common
+            # (approve() lets the reviewer pick an arbitrary character_id for the candidate_id).
+            face = connection.execute(
+                "SELECT file_path,quality_score,source_episode_id FROM visual_references WHERE entity_type='character_candidate' AND entity_id=? AND reference_kind IN ('review_face_crop','review_face') "
+                "ORDER BY CASE reference_kind WHEN 'review_face_crop' THEN 0 ELSE 1 END LIMIT 1",
+                (candidate_id,),
+            ).fetchone()
+            if face:
+                connection.execute(
+                    "INSERT INTO visual_references(reference_id,entity_type,entity_id,reference_kind,file_path,quality_score,source_episode_id) VALUES(?,?,?,?,?,?,?) "
+                    "ON CONFLICT(reference_id) DO UPDATE SET file_path=excluded.file_path,quality_score=excluded.quality_score,source_episode_id=excluded.source_episode_id",
+                    (f"approved_face:{character_id}", "character", character_id, "approved_face", face["file_path"], face["quality_score"], face["source_episode_id"]),
+                )
         return {"candidate_id": candidate_id, "character_id": character_id, "canonical_name": name, "status": "approved"}
 
     def create_manual(self, series_id: str, character_id: str, canonical_name: str) -> dict:

@@ -40,7 +40,14 @@ class ComfyUIWorkflowBackend(VideoBackend):
             raise ValueError("ComfyUI API must be a local loopback address on the rendering worker")
 
     def render_shot(self, specification: dict, on_submitted: Callable[[str], None] | None = None) -> str:
-        template = json.loads(Path(self.config.workflow_template).read_text(encoding="utf-8"))
+        template_path = self.config.workflow_template
+        reference_image = specification.get("reference_image")
+        if reference_image and self.config.img2video_workflow_template:
+            # A real face crop of the shot's character anchors the generation, instead of pure
+            # text-to-video (which cannot reproduce a specific person's likeness at all).
+            template_path = self.config.img2video_workflow_template
+            specification = {**specification, "image_filename": self._upload_image(Path(self.project_root) / reference_image)}
+        template = json.loads(Path(template_path).read_text(encoding="utf-8"))
         client_id = str(uuid.uuid4())
         workflow = self._replace(template, {**self.RENDER_DEFAULTS, **specification})
         queued = self._post("/prompt", {"prompt": workflow, "client_id": f"seriesai-{client_id}"})
@@ -111,3 +118,18 @@ class ComfyUIWorkflowBackend(VideoBackend):
         try:
             with urlopen(request, timeout=30) as response: return json.loads(response.read())
         except (HTTPError, URLError, json.JSONDecodeError) as error: raise RuntimeError(f"ComfyUI API request failed: {error}") from error
+
+    def _upload_image(self, path: Path) -> str:
+        """Upload a local reference image to ComfyUI's input store; returns the filename to use in a LoadImage node."""
+        if not path.is_file(): raise FileNotFoundError(f"Reference image not found: {path}")
+        boundary = f"seriesai-{uuid.uuid4().hex}"
+        data = path.read_bytes()
+        body = (
+            f"--{boundary}\r\nContent-Disposition: form-data; name=\"image\"; filename=\"{path.name}\"\r\n"
+            f"Content-Type: image/jpeg\r\n\r\n"
+        ).encode() + data + f"\r\n--{boundary}\r\nContent-Disposition: form-data; name=\"overwrite\"\r\n\r\ntrue\r\n--{boundary}--\r\n".encode()
+        request = Request(self.base_url + "/upload/image", data=body, headers={"Content-Type": f"multipart/form-data; boundary={boundary}"})
+        try:
+            with urlopen(request, timeout=30) as response: result = json.loads(response.read())
+        except (HTTPError, URLError, json.JSONDecodeError) as error: raise RuntimeError(f"ComfyUI image upload failed: {error}") from error
+        return result["name"]

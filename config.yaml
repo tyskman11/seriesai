@@ -36,6 +36,9 @@ ollama:
 comfyui_api:
   api_url: "http://127.0.0.1:8188"
   workflow_template: "workflows/ltx23_gguf_api.json"
+  # Used instead of the above whenever a shot has a real reference face image, so generated
+  # characters actually resemble the original cast instead of a generic text-only guess.
+  img2video_workflow_template: "workflows/ltx23_img2video_api.json"
   poll_seconds: 2
   timeout_seconds: 7200
 
