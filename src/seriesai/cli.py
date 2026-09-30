@@ -38,7 +38,8 @@ from .services.render_readiness import render_readiness
 from .backends.comfyui import ComfyUIWorkflowBackend, WAN_NEGATIVE_PROMPT
 
 
-def main() -> None:
+def build_parser() -> argparse.ArgumentParser:
+    """Build the full CLI parser without running anything. Reused by the WebUI's generic command runner for introspection."""
     parser = argparse.ArgumentParser(prog="seriesai")
     parser.add_argument("--config", type=Path, default=Path("config.yaml"))
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -155,6 +156,11 @@ def main() -> None:
     render_test_parser.add_argument("--output", type=Path, default=Path("Series/Generated/verification/wan_self_test.mp4"))
     adopt_parser = subparsers.add_parser("adopt-rendered-shot", help="Safely adopt a completed local ComfyUI output for its reserved queue item")
     adopt_parser.add_argument("--item-id", required=True); adopt_parser.add_argument("--worker-id", required=True); adopt_parser.add_argument("--source", type=Path, required=True)
+    return parser
+
+
+def main() -> None:
+    parser = build_parser()
     args = parser.parse_args()
     config = load_config(args.config)
     if args.command in {"init-db", "init"}:

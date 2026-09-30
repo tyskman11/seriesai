@@ -268,6 +268,18 @@ def handler_factory(coordinator: Coordinator):
                     return self._json(400, {"error": str(error)})
             if self.path.startswith("/voice-sample/"):
                 return self._file(Path.cwd() / "Series" / "voice_review" / self.path.removeprefix("/voice-sample/"), "audio/wav")
+            if self.path == "/cli/commands":
+                from . import cli_jobs
+                return self._json(200, {"commands": cli_jobs.describe_commands()})
+            if self.path == "/cli/jobs":
+                from . import cli_jobs
+                return self._json(200, {"jobs": cli_jobs.recent()})
+            if self.path.startswith("/cli/jobs/"):
+                from . import cli_jobs
+                try:
+                    return self._json(200, cli_jobs.status(self.path.removeprefix("/cli/jobs/").strip("/")))
+                except ValueError as error:
+                    return self._json(404, {"error": str(error)})
             if self.path == "/series":
                 with sqlite3.connect(Path.cwd() / "Series" / "series.db") as connection:
                     connection.row_factory = sqlite3.Row
@@ -396,6 +408,13 @@ def handler_factory(coordinator: Coordinator):
                 except (KeyError, ValueError, OSError, sqlite3.Error) as error:
                     return self._json(400, {"error": str(error)})
             payload = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))) or b"{}")
+            if self.path == "/cli/run":
+                if not self._require_admin(): return
+                try:
+                    from . import cli_jobs
+                    return self._json(202, cli_jobs.start(str(payload["command"]), payload.get("args") or {}))
+                except (KeyError, ValueError) as error:
+                    return self._json(400, {"error": str(error)})
             if self.path == "/episode-pipeline/start":
                 if not self._require_admin(): return
                 try:
@@ -705,6 +724,55 @@ else if(job.status==='completed'){let detail={};try{detail=JSON.parse(job.detail
 else if(job.status==='failed'){el.textContent='Fehlgeschlagen: '+job.detail}
 }catch(e){}}
 loadEpisodeCharacters();episodeStatus();setInterval(episodeStatus,4000)})();</script>"""
+            page += """<script>(function(){const anchor=document.getElementById('nodes');anchor.insertAdjacentHTML('beforebegin','<h2>Terminal</h2><p class="muted">Alle Terminal-Befehle (seriesai.cli), direkt aus dem Dashboard. Ein Befehl laeuft als Hintergrundprozess; die Ausgabe erscheint unten live.</p><div class="admin-only"><p>Befehl: <select id="cliCommand" style="min-width:280px"></select></p><p id="cliArgs"></p><p><button id="cliRun">Ausfuehren</button></p></div><p class="muted" id="cliRunStatus"></p><pre id="cliLog" style="max-height:320px;overflow:auto;background:#0b0f16;padding:.8rem;border-radius:8px;font-size:.8rem;white-space:pre-wrap"></pre><h3>Letzte Befehle</h3><ul id="cliHistory"></ul>');
+const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+let commands=[],pollTimer=null;
+async function loadCommands(){
+  commands=(await fetch('/cli/commands',{cache:'no-store'}).then(r=>r.json())).commands||[];
+  const select=document.getElementById('cliCommand');
+  select.innerHTML=commands.map(c=>'<option value="'+esc(c.name)+'">'+esc(c.name)+(c.help?' – '+esc(c.help):'')+'</option>').join('');
+  renderArgs();
+}
+function renderArgs(){
+  const command=commands.find(c=>c.name===document.getElementById('cliCommand').value);
+  const box=document.getElementById('cliArgs');
+  if(!command){box.innerHTML='';return}
+  box.innerHTML=(command.args||[]).map(a=>{
+    const label=(a.flag||a.dest)+(a.required?' *':'');
+    if(a.kind==='store_true') return '<label style="margin-right:1rem"><input type="checkbox" class="cli-arg" data-dest="'+esc(a.dest)+'" data-kind="store_true"> '+esc(label)+'</label>';
+    const type=a.type==='number'?'number':'text';
+    return '<label style="display:block;margin:.3rem 0">'+esc(label)+(a.help?' <small class="muted">('+esc(a.help)+')</small>':'')+'<br><input class="cli-arg" data-dest="'+esc(a.dest)+'" data-kind="value" type="'+type+'" '+(a.default!=null?'placeholder="Standard: '+esc(a.default)+'"':'')+' style="width:360px"></label>';
+  }).join('')||'<span class="muted">Keine Parameter.</span>';
+}
+document.getElementById('cliCommand').addEventListener('change',renderArgs);
+document.getElementById('cliRun').onclick=async()=>{
+  const command=document.getElementById('cliCommand').value,args={};
+  document.querySelectorAll('.cli-arg').forEach(input=>{args[input.dataset.dest]=input.dataset.kind==='store_true'?input.checked:input.value.trim()});
+  const r=await fetch('/cli/run',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({command,args})});
+  const data=await r.json();
+  if(!r.ok){alert(data.error||'Fehlgeschlagen');return}
+  document.getElementById('cliRunStatus').textContent='Laeuft: '+command+' ('+data.argv.join(' ')+')';
+  watchJob(data.job_id);
+  loadHistory();
+};
+function watchJob(jobId){
+  if(pollTimer)clearInterval(pollTimer);
+  async function tick(){
+    const job=await fetch('/cli/jobs/'+encodeURIComponent(jobId),{cache:'no-store'}).then(r=>r.json());
+    document.getElementById('cliLog').textContent=job.log_tail||'';
+    document.getElementById('cliLog').scrollTop=1e9;
+    document.getElementById('cliRunStatus').textContent=job.command+' ('+job.argv.join(' ')+') – '+job.status+(job.returncode!=null?' (Code '+job.returncode+')':'');
+    if(job.status!=='running'){clearInterval(pollTimer);loadHistory()}
+  }
+  tick();pollTimer=setInterval(tick,2000);
+}
+async function loadHistory(){
+  const jobs=(await fetch('/cli/jobs',{cache:'no-store'}).then(r=>r.json())).jobs||[];
+  document.getElementById('cliHistory').innerHTML=jobs.map(j=>'<li><button class="cli-history-item view-ok" data-job="'+esc(j.job_id)+'" style="width:100%;text-align:left">'+esc(j.command)+' – '+esc(j.status)+' · '+esc((j.started_at||'').replace('T',' ').slice(0,19))+'</button></li>').join('')||'<li class="muted">Noch keine Befehle ausgefuehrt.</li>';
+  document.querySelectorAll('.cli-history-item').forEach(btn=>btn.onclick=()=>watchJob(btn.dataset.job));
+}
+loadCommands();loadHistory();
+})();</script>"""
             page += """<script>(function(){const anchor=document.getElementById('nodes');anchor.insertAdjacentHTML('beforebegin','<h2>Lokale Render-Bereitschaft</h2><p class="muted" id="renderReadiness">Pruefe ComfyUI und lokale Wan-Dateien …</p>');async function checkRender(){try{const p=(await fetch('/status',{cache:'no-store'}).then(r=>r.json())).pipeline||{},r=p.render_readiness||{};const models=[...(r.wan_models||[]),...(r.text_encoders||[]),...(r.vaes||[])];document.getElementById('renderReadiness').textContent=r.ready?'Bereit: lokaler ComfyUI-Renderer kann Queue-Shots ausfuehren.':('Status: '+(r.state||'unbekannt')+' · ComfyUI API: '+(r.api_online?'online':'offline')+' · Workflow: '+(r.workflow_configured?'konfiguriert':'nicht konfiguriert')+' · lokale Dateien: '+(models.join(', ')||'keine')+' · Naechster Schritt: '+(r.required_next_step||'–'));}catch(e){document.getElementById('renderReadiness').textContent='Render-Bereitschaft konnte nicht gelesen werden.'}}checkRender();setInterval(checkRender,5000)})();</script>"""
             page += """<script>(function(){
 function wrapSections(){
@@ -736,7 +804,7 @@ function wrapSections(){
 setTimeout(wrapSections,800);setTimeout(wrapSections,2000);
 })();</script>"""
             page += """<script>(function(){
-const groups={'Uebersicht':['Aktuelle Aufgaben','Client-Rollen','Series-Brain-Analyse'],'Figuren & Beziehungen':['Figuren-Pruefung','Beziehungsbelege','Profil-Vorschlaege'],'Stimmen':['Stimmen-Pruefung'],'Episode generieren':['Episode generieren'],'Render':['Render-Queue','Lokale Render-Bereitschaft']};
+const groups={'Uebersicht':['Aktuelle Aufgaben','Client-Rollen','Series-Brain-Analyse'],'Figuren & Beziehungen':['Figuren-Pruefung','Beziehungsbelege','Profil-Vorschlaege'],'Stimmen':['Stimmen-Pruefung'],'Episode generieren':['Episode generieren'],'Render':['Render-Queue','Lokale Render-Bereitschaft'],'Terminal':['Terminal']};
 function buildTabs(){
   const main=document.querySelector('main');
   if(!main||main.dataset.tabsDone)return;
