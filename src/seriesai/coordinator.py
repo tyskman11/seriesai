@@ -36,7 +36,7 @@ class Coordinator:
         self.profiles = self._load_profiles()
         self.restart_generation = self._load_restart_generation()
         master = self.profiles.get("master", {})
-        self.workers: dict[str, dict] = {"master": {"name": os.environ.get("COMPUTERNAME") or "master", "platform": os.sys.platform, "role": master.get("role", "master-worker")}}
+        self.workers: dict[str, dict] = {"master": {"name": os.environ.get("COMPUTERNAME") or "master", "platform": os.sys.platform, "role": master.get("role", "master-worker"), "last_seen": datetime.now(timezone.utc).isoformat()}}
         self.lock = threading.Lock()
         self.admin_token = self._load_or_create_admin_token()
         # One slot per *kind* of task (not a single global slot): embed-voices, cluster-voices,
@@ -161,12 +161,34 @@ class Coordinator:
         name = payload.get("name", "unknown")
         platform = payload.get("platform", "unknown")
         worker_id = payload.get("client_id") or f"{name.lower()}::{platform.lower()}"
+        intensity = payload.get("work_intensity")
         with self.lock:
             saved = self.profiles.get(worker_id, {})
-            self.workers[worker_id] = {"name": name, "platform": platform, "role": saved.get("role", "worker")}
+            self.workers[worker_id] = {"name": name, "platform": platform, "role": saved.get("role", "worker"), "last_seen": datetime.now(timezone.utc).isoformat()}
+            if intensity: self.workers[worker_id]["work_intensity"] = intensity
             self.profiles[worker_id] = {"name": name, "platform": platform, "role": self.workers[worker_id]["role"]}
             self._save_profiles()
         return {"worker_id": worker_id}
+
+    def touch_worker(self, worker_id: str) -> None:
+        """Record that this worker is still alive, so the stale-worker recovery sweep leaves its shot alone."""
+        with self.lock:
+            if worker_id in self.workers:
+                self.workers[worker_id]["last_seen"] = datetime.now(timezone.utc).isoformat()
+
+    def stale_worker_ids(self, timeout_seconds: float) -> list[str]:
+        cutoff = datetime.now(timezone.utc).timestamp() - timeout_seconds
+        with self.lock:
+            stale = []
+            for worker_id, worker in self.workers.items():
+                if worker_id == "master": continue
+                last_seen = worker.get("last_seen")
+                try:
+                    seen_at = datetime.fromisoformat(last_seen).timestamp() if last_seen else 0
+                except ValueError:
+                    seen_at = 0
+                if seen_at < cutoff: stale.append(worker_id)
+            return stale
 
     def set_role(self, worker_id: str, role: str) -> dict:
         if role not in self.ROLES:
@@ -352,6 +374,7 @@ def handler_factory(coordinator: Coordinator):
                 return self._json(200, {"episode": {"episode_id": episode[0], "season_number": episode[1], "episode_number": episode[2], "title": episode[3]}, "events": [{"event_type": row[0], "description": row[1]} for row in events]})
             if self.path.startswith("/render-queue/worker/") and self.path.endswith("/inflight"):
                 worker_id = self.path.removeprefix("/render-queue/worker/").removesuffix("/inflight").strip("/")
+                coordinator.touch_worker(worker_id)
                 database = Path.cwd() / "Series" / "series.db"
                 with sqlite3.connect(database) as connection:
                     row = connection.execute("SELECT item_id,job_id,sequence_number,checkpoint_json FROM generation_job_items WHERE worker_id=? AND status='rendering' ORDER BY started_at LIMIT 1", (worker_id,)).fetchone()
@@ -395,6 +418,7 @@ def handler_factory(coordinator: Coordinator):
             if self.path.startswith("/render-queue/items/") and self.path.endswith("/upload"):
                 item_id = self.path.removeprefix("/render-queue/items/").removesuffix("/upload").strip("/")
                 worker_id = self.headers.get("X-SeriesAI-Worker", "").strip()
+                coordinator.touch_worker(worker_id)
                 try:
                     length = int(self.headers.get("Content-Length", "0"))
                     if not worker_id or length <= 0 or length > 8 * 1024 * 1024 * 1024:
@@ -519,6 +543,7 @@ def handler_factory(coordinator: Coordinator):
                 worker_id = str(payload.get("worker_id", "")).strip()
                 if not worker_id:
                     return self._json(400, {"error": "worker_id is required"})
+                coordinator.touch_worker(worker_id)
                 try:
                     from .services.queue_worker import QueueWorkerService
                     database = Database(Path.cwd() / "Series" / "series.db")
@@ -530,12 +555,14 @@ def handler_factory(coordinator: Coordinator):
                 worker_id = str(payload.get("worker_id", "")).strip()
                 if not worker_id:
                     return self._json(400, {"error": "worker_id is required"})
+                coordinator.touch_worker(worker_id)
                 from .services.queue_worker import QueueWorkerService
                 database = Database(Path.cwd() / "Series" / "series.db")
                 return self._json(200, {"item": QueueWorkerService(database).claim_next_any(worker_id)})
             if self.path.startswith("/render-queue/items/") and self.path.endswith("/submission"):
                 item_id = self.path.removeprefix("/render-queue/items/").removesuffix("/submission").strip("/")
                 try:
+                    coordinator.touch_worker(str(payload.get("worker_id", "")))
                     from .services.queue_worker import QueueWorkerService
                     database = Database(Path.cwd() / "Series" / "series.db")
                     QueueWorkerService(database).record_backend_submission(item_id, str(payload["worker_id"]), str(payload.get("backend", "comfyui")), str(payload["prompt_id"]))
@@ -545,6 +572,7 @@ def handler_factory(coordinator: Coordinator):
             if self.path.startswith("/render-queue/items/") and self.path.endswith("/complete"):
                 item_id = self.path.removeprefix("/render-queue/items/").removesuffix("/complete").strip("/")
                 try:
+                    coordinator.touch_worker(str(payload.get("worker_id", "")))
                     from .services.queue_worker import QueueWorkerService
                     database = Database(Path.cwd() / "Series" / "series.db")
                     result = QueueWorkerService(database).complete(item_id, str(payload["worker_id"]), str(payload["output_path"]))
@@ -554,6 +582,7 @@ def handler_factory(coordinator: Coordinator):
             if self.path.startswith("/render-queue/items/") and self.path.endswith("/fail"):
                 item_id = self.path.removeprefix("/render-queue/items/").removesuffix("/fail").strip("/")
                 try:
+                    coordinator.touch_worker(str(payload.get("worker_id", "")))
                     from .services.queue_worker import QueueWorkerService
                     database = Database(Path.cwd() / "Series" / "series.db")
                     result = QueueWorkerService(database).fail(item_id, str(payload["worker_id"]), str(payload.get("error", "Unspecified local rendering error")), bool(payload.get("retry", True)))
@@ -856,6 +885,26 @@ setTimeout(buildTabs,2500);setTimeout(buildTabs,4500);
     return Handler
 
 
+def run_stale_worker_recovery(coordinator: "Coordinator", timeout_seconds: float = 90.0) -> None:
+    """A worker can drop out at any time (closed terminal, crash, network loss). Every
+    render-queue request touches the coordinator's last-seen timestamp for that worker,
+    so once a worker goes quiet for too long its in-flight shot is returned to the queue
+    automatically - no manual `recover-queue` CLI call needed."""
+    while True:
+        time.sleep(max(10.0, timeout_seconds / 3))
+        try:
+            stale = coordinator.stale_worker_ids(timeout_seconds)
+            if not stale: continue
+            database = Path.cwd() / "Series" / "series.db"
+            if not database.exists(): continue
+            from .services.queue_worker import QueueWorkerService
+            result = QueueWorkerService(Database(database)).recover_for_workers(stale)
+            if result["recovered_items"]:
+                print(f"[Koordinator] {result['recovered_items']} Shot(s) von inaktiven Workern {stale} automatisch zur Wiederholung freigegeben.", flush=True)
+        except Exception as error:
+            print(f"[Koordinator] Automatische Worker-Wiederherstellung fehlgeschlagen: {error}", flush=True)
+
+
 def run_episode_queue(coordinator: "Coordinator") -> None:
     """One persistent worker thread: resumes an in-flight episode after a restart, then
     works through the queue for as long as the coordinator runs. Started once at startup."""
@@ -878,6 +927,11 @@ def main() -> None:
     start_discovery_responder(args.host, args.port)
     coordinator = Coordinator(args.host, args.port)
     threading.Thread(target=run_episode_queue, args=(coordinator,), daemon=True).start()
+    try:
+        worker_timeout = load_config(Path.cwd() / "config.yaml").hardware.worker_timeout_seconds
+    except Exception:
+        worker_timeout = 90.0
+    threading.Thread(target=run_stale_worker_recovery, args=(coordinator, worker_timeout), daemon=True).start()
     ThreadingHTTPServer((args.host, args.port), handler_factory(coordinator)).serve_forever()
 
 

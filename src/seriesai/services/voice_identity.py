@@ -21,6 +21,23 @@ from ..paths import project_path, project_relative
 MIN_SECONDS, MAX_SECONDS = 1.5, 12.0
 SAMPLE_RATE = 16000
 EMBEDDING_DIM = 192
+NO_SPEECH_PROBABILITY_MAX = 0.5   # Whisper segments above this are too likely non-speech to embed.
+
+# Stage 1 (per-episode): cosine distance at which AgglomerativeClustering splits a local
+# cluster; an episode needs at least this many embedded segments to attempt clustering at
+# all, and a resulting local cluster needs at least this many members to be kept.
+LOCAL_CLUSTER_DISTANCE_THRESHOLD = 0.6
+LOCAL_CLUSTER_MIN_SEGMENTS_PER_EPISODE = 10
+LOCAL_CLUSTER_MIN_MEMBERS = 8
+
+# Stage 2 (series-wide): cosine distance at which per-episode local-cluster centroids get
+# merged into one global voice.
+GLOBAL_CLUSTER_DISTANCE_THRESHOLD = 0.45
+# A segment is assigned to its nearest global voice only if the cosine similarity clears
+# this bar; below it, it's left unassigned rather than forced onto the closest-but-still-far
+# voice. A global voice then needs at least this many assigned segments to be kept at all.
+GLOBAL_ASSIGNMENT_SIMILARITY_MIN = 0.35
+GLOBAL_CLUSTER_MIN_ASSIGNED_SEGMENTS = 30
 
 
 @dataclass(frozen=True)
@@ -60,7 +77,7 @@ class VoiceIdentityService:
             segments = [dict(row) for row in connection.execute(
                 "SELECT s.segment_id,s.start_seconds,s.end_seconds FROM transcript_segments s JOIN transcripts t ON t.transcript_id=s.transcript_id "
                 "LEFT JOIN voice_embeddings v ON v.segment_id=s.segment_id WHERE t.episode_id=? AND t.status='completed' AND v.segment_id IS NULL "
-                "AND s.end_seconds-s.start_seconds BETWEEN ? AND ? AND COALESCE(s.no_speech_probability,0)<0.5 ORDER BY s.start_seconds", (episode_id, MIN_SECONDS, MAX_SECONDS))]
+                "AND s.end_seconds-s.start_seconds BETWEEN ? AND ? AND COALESCE(s.no_speech_probability,0)<? ORDER BY s.start_seconds", (episode_id, MIN_SECONDS, MAX_SECONDS, NO_SPEECH_PROBABILITY_MAX))]
         if not audio: raise ValueError("Imported 16 kHz audio is required.")
         if not segments: return EmbedResult(episode_id, 0, "already_embedded")
         wave, rate = soundfile.read(str(project_path(self.config.paths.project_root, audio["file_path"])), dtype="float32")
@@ -100,22 +117,22 @@ class VoiceIdentityService:
         local_centroids: list[np.ndarray] = []; local_members: list[np.ndarray] = []
         for episode in np.unique(episodes):
             indices = np.where(episodes == episode)[0]
-            if len(indices) < 10: continue
-            labels = AgglomerativeClustering(n_clusters=None, metric="cosine", linkage="average", distance_threshold=0.6).fit_predict(vectors[indices])
+            if len(indices) < LOCAL_CLUSTER_MIN_SEGMENTS_PER_EPISODE: continue
+            labels = AgglomerativeClustering(n_clusters=None, metric="cosine", linkage="average", distance_threshold=LOCAL_CLUSTER_DISTANCE_THRESHOLD).fit_predict(vectors[indices])
             for label in np.unique(labels):
                 members = indices[labels == label]
-                if len(members) >= 8:
+                if len(members) >= LOCAL_CLUSTER_MIN_MEMBERS:
                     local_centroids.append(_normalize(vectors[members].mean(axis=0))); local_members.append(members)
         if len(local_centroids) < 2: raise ValueError("Too little consistent speech to form voice clusters.")
         # Stage 2: merge the episode-local voices across the series.
         centroids = np.stack(local_centroids)
-        global_labels = AgglomerativeClustering(n_clusters=None, metric="cosine", linkage="average", distance_threshold=0.45).fit_predict(centroids)
+        global_labels = AgglomerativeClustering(n_clusters=None, metric="cosine", linkage="average", distance_threshold=GLOBAL_CLUSTER_DISTANCE_THRESHOLD).fit_predict(centroids)
         global_centroids = np.stack([_normalize(centroids[global_labels == label].mean(axis=0)) for label in np.unique(global_labels)])
         # Assign every segment to its nearest global voice when it is close enough.
         similarity = vectors @ global_centroids.T
-        assignment = np.where(similarity.max(axis=1) >= 0.35, similarity.argmax(axis=1), -1)
+        assignment = np.where(similarity.max(axis=1) >= GLOBAL_ASSIGNMENT_SIMILARITY_MIN, similarity.argmax(axis=1), -1)
         durations = np.array([row["end_seconds"] - row["start_seconds"] for row in rows])
-        order = sorted((label for label in range(len(global_centroids)) if (assignment == label).sum() >= 30), key=lambda label: -durations[assignment == label].sum())
+        order = sorted((label for label in range(len(global_centroids)) if (assignment == label).sum() >= GLOBAL_CLUSTER_MIN_ASSIGNED_SEGMENTS), key=lambda label: -durations[assignment == label].sum())
         with self.database.connect() as connection:
             connection.execute("UPDATE voice_embeddings SET cluster_id=NULL WHERE episode_id IN (SELECT episode_id FROM episodes WHERE series_id=?)", (series_id,))
             connection.execute("DELETE FROM voice_clusters WHERE series_id=?", (series_id,))

@@ -50,7 +50,8 @@ class ComfyUIWorkflowBackend(VideoBackend):
             specification = {**specification, "image_filename": self._upload_image(Path(self.project_root) / reference_image)}
         template = json.loads(Path(template_path).read_text(encoding="utf-8"))
         client_id = str(uuid.uuid4())
-        workflow = self._replace(template, {**self.RENDER_DEFAULTS, **specification})
+        defaults = {**self.RENDER_DEFAULTS, "steps": self.config.steps, "cfg": self.config.cfg}
+        workflow = self._replace(template, {**defaults, **specification})
         queued = self._post("/prompt", {"prompt": workflow, "client_id": f"seriesai-{client_id}"})
         prompt_id = queued.get("prompt_id")
         if not prompt_id:

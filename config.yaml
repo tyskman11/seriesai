@@ -1,3 +1,9 @@
+# role: auto (default) lets this machine become the coordinator if it's the first one up on
+# the network, or a worker if it finds one already running. Set to worker-only on every
+# machine except the main one to guarantee it NEVER self-elects as coordinator, regardless
+# of startup timing - the reliable way to make "client 2 and onward" always a worker.
+role: auto
+
 paths:
   project_root: "."
   series_root: "Series"
@@ -8,6 +14,14 @@ hardware:
   gpu_vram_gb: 6
   system_ram_gb: 32
   prefer_cpu_offload: true
+  # How hard this machine renders while it's a worker: eco leaves headroom to use the
+  # machine for other things at the same time (lower ComfyUI VRAM use, fewer render steps,
+  # a pause between shots); full renders as fast as this hardware allows. balanced is in
+  # between. Also sets comfyui_api.steps/cfg defaults unless those are set explicitly below.
+  work_intensity: full   # eco | balanced | full
+  # How long a worker may go quiet (no render-queue request reaching the coordinator) before
+  # its in-progress shot is assumed abandoned and automatically returned to the queue.
+  worker_timeout_seconds: 90
 
 models:
   transcription_backend: whisperx
@@ -41,6 +55,10 @@ comfyui_api:
   img2video_workflow_template: "workflows/ltx23_img2video_api.json"
   poll_seconds: 2
   timeout_seconds: 7200
+  # Leave unset (null) to derive both from hardware.work_intensity; set explicitly to pin
+  # render quality regardless of the chosen intensity preset.
+  steps: null
+  cfg: null
 
 # Optional local Piper executable and voice-model directory for test/dialogue
 # synthesis. Voice cloning remains an explicit future backend choice.

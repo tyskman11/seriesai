@@ -18,6 +18,11 @@ class HardwareConfig(BaseModel):
     gpu_vram_gb: int = Field(ge=1)
     system_ram_gb: int = Field(ge=1)
     prefer_cpu_offload: bool = True
+    # How much of this machine's hardware the project may use while it's a worker: "eco" leaves
+    # headroom for using the machine for other things at the same time, "full" renders as fast
+    # as possible. Drives ComfyUI's VRAM mode, an inter-shot throttle pause, and render step count.
+    work_intensity: str = Field(default="full", pattern="^(eco|balanced|full)$")
+    worker_timeout_seconds: float = Field(default=90.0, ge=10.0)
 
 
 class ModelsConfig(BaseModel):
@@ -51,6 +56,10 @@ class ComfyUIConfig(BaseModel):
     img2video_workflow_template: Path | None = None
     poll_seconds: float = Field(default=2.0, ge=.2, le=30)
     timeout_seconds: int = Field(default=7200, ge=30)
+    # None means "derive from hardware.work_intensity" (see load_config); set explicitly here
+    # to override that derivation regardless of the chosen intensity preset.
+    steps: int | None = Field(default=None, ge=1, le=150)
+    cfg: float | None = Field(default=None, ge=0.5, le=20)
 
 
 class PiperConfig(BaseModel):
@@ -61,6 +70,11 @@ class PiperConfig(BaseModel):
 class ProcessingConfig(BaseModel):
     checkpoint_enabled: bool = True
     max_job_retries: int = Field(default=3, ge=0)
+
+
+# steps/cfg per hardware.work_intensity when comfyui_api.steps/cfg aren't set explicitly:
+# eco trades render quality for speed, full matches the long-standing hand-tuned default.
+INTENSITY_RENDER_DEFAULTS = {"eco": (20, 4.0), "balanced": (26, 4.25), "full": (32, 4.5)}
 
 
 class LocalizationConfig(BaseModel):
@@ -95,6 +109,9 @@ def load_config(path: Path | str) -> AppConfig:
         config.comfyui_api.img2video_workflow_template = _resolve_path(config.paths.project_root, config.comfyui_api.img2video_workflow_template)
     if config.piper.models_root:
         config.piper.models_root = _resolve_path(config.paths.project_root, config.piper.models_root)
+    default_steps, default_cfg = INTENSITY_RENDER_DEFAULTS.get(config.hardware.work_intensity, INTENSITY_RENDER_DEFAULTS["full"])
+    if config.comfyui_api.steps is None: config.comfyui_api.steps = default_steps
+    if config.comfyui_api.cfg is None: config.comfyui_api.cfg = default_cfg
     return config
 
 

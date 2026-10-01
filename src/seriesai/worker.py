@@ -38,13 +38,17 @@ def upload(url: str, worker_id: str, path: Path) -> dict:
     return json.loads(body)
 
 
-def run(master_url: str, worker_id: str, config_path: Path, poll_seconds: float) -> None:
+INTENSITY_PAUSE_SECONDS = {"eco": 20.0, "balanced": 5.0, "full": 0.0}
+
+
+def run(master_url: str, worker_id: str, config_path: Path, poll_seconds: float, intensity: str = "full") -> None:
     config = load_config(config_path)
     if config.models.video_backend != "comfyui":
         raise SystemExit("This worker requires models.video_backend: comfyui in its local config.yaml.")
     backend = ComfyUIWorkflowBackend(config.comfyui_api, config.paths.comfyui, config.paths.project_root)
     base = master_url.rstrip("/")
-    print(f"[Worker] {worker_id} wartet auf lokale ComfyUI-Shots von {base}", flush=True)
+    intensity_pause = INTENSITY_PAUSE_SECONDS.get(intensity, 0.0)
+    print(f"[Worker] {worker_id} wartet auf lokale ComfyUI-Shots von {base} (Arbeitsintensitaet: {intensity})", flush=True)
     while True:
         try:
             status = request_json(base + "/status")
@@ -70,6 +74,7 @@ def run(master_url: str, worker_id: str, config_path: Path, poll_seconds: float)
                 except Exception as error:
                     request_json(base + "/render-queue/items/" + item_id + "/fail", {"worker_id": worker_id, "error": str(error), "retry": True})
                     print(f"[Worker] Wiederhergestellter Shot fehlgeschlagen: {error}", flush=True)
+                if intensity_pause: time.sleep(intensity_pause)
                 continue
             claimed = request_json(base + "/render-queue/claim-next", {"worker_id": worker_id}).get("item")
             if not claimed:
@@ -85,6 +90,7 @@ def run(master_url: str, worker_id: str, config_path: Path, poll_seconds: float)
             except Exception as error:
                 request_json(base + "/render-queue/items/" + item_id + "/fail", {"worker_id": worker_id, "error": str(error), "retry": True})
                 print(f"[Worker] Shot fehlgeschlagen, Retry gespeichert: {error}", flush=True)
+            if intensity_pause: time.sleep(intensity_pause)
         except (HTTPError, URLError, OSError, json.JSONDecodeError) as error:
             print(f"[Worker] Koordinator/Netzwerk nicht erreichbar: {error}", flush=True)
             time.sleep(max(5, poll_seconds))
@@ -96,7 +102,8 @@ def main() -> None:
     parser.add_argument("--worker-id", default=(socket.gethostname().lower() + "::worker"))
     parser.add_argument("--config", type=Path, default=Path("config.yaml"))
     parser.add_argument("--poll-seconds", type=float, default=4.0)
-    args = parser.parse_args(); run(args.master, args.worker_id, args.config, max(.5, args.poll_seconds))
+    parser.add_argument("--intensity", choices=["eco", "balanced", "full"], default="full")
+    args = parser.parse_args(); run(args.master, args.worker_id, args.config, max(.5, args.poll_seconds), args.intensity)
 
 
 if __name__ == "__main__": main()

@@ -186,5 +186,7 @@ class EpisodePipelineService:
             try:
                 self.run(series_id, payload["idea"], payload["duration_minutes"], payload["episode_code"], payload.get("notes"), progress, job_id=job_id, resume_checkpoint=checkpoint,
                          character_ids=payload.get("character_ids"), crossover_series_id=payload.get("crossover_series_id"), crossover_character_ids=payload.get("crossover_character_ids"))
-            except Exception:
-                pass  # already recorded on the job row by run(); move on to the next queued episode
+            except Exception as error:
+                # Already recorded on the job row by run(); still log it here so a string of
+                # failures is visible in the terminal instead of disappearing silently.
+                print(f"[EpisodePipeline] Job {job_id} ({series_id}) fehlgeschlagen: {error}", flush=True)

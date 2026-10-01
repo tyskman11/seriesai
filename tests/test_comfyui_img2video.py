@@ -12,6 +12,8 @@ def _backend(tmp_path, workflow_template, img2video_template=None):
     config = Config()
     config.workflow_template = workflow_template
     config.img2video_workflow_template = img2video_template
+    config.steps = 32
+    config.cfg = 4.5
     backend.config = config
     return backend
 

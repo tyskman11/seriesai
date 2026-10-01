@@ -45,6 +45,12 @@ class CharacterReviewService:
             existing = connection.execute("SELECT series_id, canonical_name FROM characters WHERE character_id=?", (character_id,)).fetchone()
             if existing and existing["series_id"] != series_id:
                 raise ValueError("character_id is already assigned to another series.")
+            name_collision = connection.execute(
+                "SELECT 1 FROM characters WHERE series_id=? AND character_id!=? AND canonical_name=?",
+                (series_id, character_id, name),
+            ).fetchone()
+            if name_collision:
+                raise ValueError(f"Another character in this series is already named '{name}'.")
             if not existing:
                 connection.execute(
                     "INSERT INTO characters(character_id,series_id,canonical_name) VALUES(?,?,?)",
@@ -108,9 +114,16 @@ class CharacterReviewService:
         if not name:
             raise ValueError("canonical_name cannot be empty.")
         with self.database.connect() as connection:
-            updated = connection.execute("UPDATE characters SET canonical_name=? WHERE character_id=?", (name, character_id)).rowcount
-            if not updated:
+            series_row = connection.execute("SELECT series_id FROM characters WHERE character_id=?", (character_id,)).fetchone()
+            if not series_row:
                 raise ValueError(f"Unknown character_id: {character_id}")
+            name_collision = connection.execute(
+                "SELECT 1 FROM characters WHERE series_id=? AND character_id!=? AND canonical_name=?",
+                (series_row["series_id"], character_id, name),
+            ).fetchone()
+            if name_collision:
+                raise ValueError(f"Another character in this series is already named '{name}'.")
+            updated = connection.execute("UPDATE characters SET canonical_name=? WHERE character_id=?", (name, character_id)).rowcount
             # Keep the review list's display name and the searchable aliases in sync.
             connection.execute("UPDATE character_candidates SET canonical_name=? WHERE candidate_id=?", (name, character_id))
             connection.execute("INSERT OR IGNORE INTO character_aliases(character_id,alias) VALUES(?,?)", (character_id, name))

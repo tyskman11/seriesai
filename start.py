@@ -80,6 +80,23 @@ def configured_video_backend() -> str | None:
     return backend.group(1) if backend else None
 
 
+def configured_work_intensity() -> str:
+    match = re.search(r"(?ms)^hardware:\s*(.*?)(?=^[A-Za-z_]+:|\Z)", (ROOT / "config.yaml").read_text(encoding="utf-8"))
+    if not match: return "full"
+    value = re.search(r"^\s*work_intensity:\s*[\"']?([a-z]+)[\"']?", match.group(1), re.MULTILINE)
+    intensity = value.group(1) if value else "full"
+    return intensity if intensity in {"eco", "balanced", "full"} else "full"
+
+
+def comfyui_args_for_intensity(intensity: str) -> list[str]:
+    base = ["--windows-standalone-build", "--disable-auto-launch", "--enable-manager"]
+    # eco: leave the machine usable for other things while it renders. full: use the GPU as
+    # hard as this card allows. balanced keeps today's long-standing default behaviour.
+    if intensity == "eco": return base + ["--lowvram", "--reserve-vram", "2"]
+    if intensity == "full": return base + ["--normalvram", "--reserve-vram", "0.5"]
+    return base + ["--lowvram", "--reserve-vram", "1"]
+
+
 def _worker_state_path(client_id: str) -> Path:
     safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", client_id)
     return ROOT / "runtime" / f"render_worker_{safe}.json"
@@ -156,9 +173,6 @@ class Supervisor:
 
 SUPERVISOR = Supervisor()
 COMFYUI_URL = "http://127.0.0.1:8188"
-# --disable-auto-launch: the portable build otherwise opens a browser tab on its own; the
-# terminal's persistent link (see monitor()) is enough.
-COMFYUI_ARGS = ["--windows-standalone-build", "--disable-auto-launch", "--enable-manager", "--lowvram", "--reserve-vram", "1"]
 
 
 def configured_comfyui_root() -> Path | None:
@@ -177,7 +191,9 @@ def ensure_comfyui() -> None:
     python = root / "python_embeded" / "python.exe" if root else None
     if not python or not python.exists():
         print("[ComfyUI] python_embeded nicht gefunden; bitte ComfyUI manuell starten.", flush=True); return
-    SUPERVISOR.spawn("ComfyUI", [str(python), "-s", "ComfyUI/main.py", *COMFYUI_ARGS], root)
+    intensity = configured_work_intensity()
+    print(f"[ComfyUI] Arbeitsintensitaet: {intensity}", flush=True)
+    SUPERVISOR.spawn("ComfyUI", [str(python), "-s", "ComfyUI/main.py", *comfyui_args_for_intensity(intensity)], root)
 
 
 def ensure_local_render_worker(master_url: str, client_id: str) -> None:
@@ -193,7 +209,7 @@ def ensure_local_render_worker(master_url: str, client_id: str) -> None:
     except (OSError, ValueError, TypeError, json.JSONDecodeError):
         pass
     state.parent.mkdir(parents=True, exist_ok=True)
-    worker = SUPERVISOR.spawn("Worker", [str(venv_python()), "-m", "seriesai.worker", "--master", master_url, "--worker-id", client_id], ROOT)
+    worker = SUPERVISOR.spawn("Worker", [str(venv_python()), "-m", "seriesai.worker", "--master", master_url, "--worker-id", client_id, "--intensity", configured_work_intensity()], ROOT)
     state.write_text(json.dumps({"pid": worker.pid, "worker_id": client_id, "master_url": master_url}, indent=2), encoding="utf-8")
 
 
@@ -393,9 +409,9 @@ def ensure_face_detector_model() -> None:
         print("[Modelle] Gesichtserkennung (YuNet): Download fehlgeschlagen; naechster Start setzt fort.", flush=True)
 
 
-def discover_coordinator(port: int) -> str | None:
+def _discover_once(port: int, timeout: float) -> str | None:
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1); sock.settimeout(1.2)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1); sock.settimeout(timeout)
         try:
             sock.sendto(b"SERIESAI_DISCOVER_V1", ("255.255.255.255", DISCOVERY_PORT))
             while True:
@@ -403,6 +419,28 @@ def discover_coordinator(port: int) -> str | None:
                 if response.get("service") == "seriesai" and response.get("port") == port: return response["url"]
         except (OSError, TimeoutError, json.JSONDecodeError):
             return None
+
+
+def discover_coordinator(port: int, attempts: int = 3, timeout: float = 1.5) -> str | None:
+    # A single short broadcast window is exactly the race where two machines starting at the
+    # same moment can both find nobody home and both decide to become their own coordinator.
+    # A few retries shrink that window a lot without needing real distributed consensus.
+    for attempt in range(attempts):
+        found = _discover_once(port, timeout)
+        if found: return found
+        if attempt < attempts - 1: time.sleep(0.3)
+    return None
+
+
+def configured_role() -> str:
+    """Top-level `role: auto|worker-only` in config.yaml. 'worker-only' means this machine
+    must never self-elect as coordinator, no matter the discovery timing - the reliable way
+    to guarantee "client 2 and beyond are always workers" regardless of startup order."""
+    config_path = ROOT / "config.yaml"
+    if not config_path.is_file(): return "auto"
+    match = re.search(r'^\s*role:\s*["\']?([a-z-]+)["\']?\s*(?:#.*)?$', config_path.read_text(encoding="utf-8"), re.MULTILINE)
+    role = match.group(1) if match else "auto"
+    return role if role in {"auto", "worker-only"} else "auto"
 
 
 def human_duration(seconds: int | None) -> str:
@@ -463,12 +501,17 @@ def main() -> None:
     ensure_ollama_model()
     local_url = f"http://127.0.0.1:{args.port}"; status = request_json(f"{local_url}/status")
     monitor_url = local_url; client_id = "master"; mode = "Master & Koordinator"
+    role = configured_role()
     if not status:
         join_url = args.join or discover_coordinator(args.port)
+        if not join_url and role == "worker-only":
+            print("config.yaml: role=worker-only - dieser Client wird nie selbst Koordinator, warte auf einen Master im Netzwerk ...", flush=True)
+            while not join_url:
+                time.sleep(2.0); join_url = discover_coordinator(args.port)
         if join_url:
             name = os.environ.get("COMPUTERNAME") or socket.gethostname()
             client_id = f"{name.lower()}::{sys.platform.lower()}"
-            result = request_json(f"{join_url.rstrip('/')}/workers/register", {"name": name, "platform": sys.platform, "client_id": client_id})
+            result = request_json(f"{join_url.rstrip('/')}/workers/register", {"name": name, "platform": sys.platform, "client_id": client_id, "work_intensity": configured_work_intensity()})
             if not result: raise SystemExit(f"Koordinator konnte diesen Worker nicht aufnehmen: {join_url}")
             print(f"Mit Master verbunden: {join_url} (Worker {result['worker_id']}).", flush=True); monitor_url = join_url.rstrip("/"); mode = f"Worker von {monitor_url}"
         else:

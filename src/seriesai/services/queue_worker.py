@@ -108,6 +108,22 @@ class QueueWorkerService:
                 self._refresh_job(connection, row[0], now)
         return {"recovered_items": changed, "jobs": [row[0] for row in rows]}
 
+    def recover_for_workers(self, worker_ids: list[str]) -> dict:
+        """Return shots claimed by specific (presumed-dead) workers to retry, without touching others."""
+        if not worker_ids:
+            return {"recovered_items": 0, "jobs": []}
+        now = datetime.now(timezone.utc).isoformat()
+        placeholders = ",".join("?" * len(worker_ids))
+        with self.database.connect() as connection:
+            rows = connection.execute(f"SELECT DISTINCT job_id FROM generation_job_items WHERE status='rendering' AND worker_id IN ({placeholders})", worker_ids).fetchall()
+            changed = connection.execute(
+                f"UPDATE generation_job_items SET status='retry',worker_id=NULL,error_message=COALESCE(error_message,'Recovered after unresponsive worker'),finished_at=? WHERE status='rendering' AND worker_id IN ({placeholders})",
+                [now, *worker_ids],
+            ).rowcount
+            for row in rows:
+                self._refresh_job(connection, row[0], now)
+        return {"recovered_items": changed, "jobs": [row[0] for row in rows]}
+
     @staticmethod
     def _refresh_job(connection, job_id: str, now: str) -> None:
         counts = {row[0]: row[1] for row in connection.execute("SELECT status,COUNT(*) FROM generation_job_items WHERE job_id=? GROUP BY status", (job_id,))}
