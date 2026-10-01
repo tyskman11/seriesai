@@ -38,6 +38,8 @@ class SceneDetectionService:
             count = self._scene_count(episode_id)
             return SceneDetectionResult(episode_id, count, frame_dir, "already_analyzed")
 
+        if episode["source_deleted"]:
+            raise FileNotFoundError(f"Rohvideo fuer {episode_id} wurde nach Training geloescht (cleanup-raw-video); fuer eine (erneute) Szenenerkennung muesste die Episode neu importiert werden.")
         frame_dir.mkdir(parents=True, exist_ok=True)
         self._stage_upsert(episode_id, "running", json.dumps({"threshold": threshold, "frame_directory": str(frame_dir)}))
         source_path = project_path(self.config.paths.project_root, episode["source_path"])
@@ -70,7 +72,7 @@ class SceneDetectionService:
 
     def _episode(self, episode_id: str):
         with self.database.connect() as connection:
-            row = connection.execute("SELECT episode_id, source_path, source_metadata_json FROM episodes WHERE episode_id = ?", (episode_id,)).fetchone()
+            row = connection.execute("SELECT episode_id, source_path, source_metadata_json, source_deleted FROM episodes WHERE episode_id = ?", (episode_id,)).fetchone()
         if row is None:
             raise ValueError(f"Unknown episode: {episode_id}")
         return row
