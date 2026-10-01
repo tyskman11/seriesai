@@ -74,9 +74,12 @@ class EpisodePipelineService:
                 blocking = [issue for issue in continuity["issues"] if issue.get("severity") == "error"]
                 if blocking:
                     raise RuntimeError("Kontinuitaetsfehler blockieren die Episode: " + "; ".join(issue["description"] for issue in blocking))
-                report("creating_shot_queue", outline_path=str(outline_path), title=title)
+                # Non-blocking warnings don't stop the episode, but they'd otherwise only ever
+                # live in continuity_report.json and never reach the dashboard/checkpoint.
+                warnings = [issue["description"] for issue in continuity["issues"] if issue.get("severity") == "warning"]
+                report("creating_shot_queue", outline_path=str(outline_path), title=title, continuity_warnings=warnings)
                 queue = ShotQueueService(self.config, self.database).create(outline_path)
-                report("rendering", shot_job_id=queue["job_id"], shot_count=queue["shot_count"], counts=self._shot_counts(queue["job_id"]), title=title)
+                report("rendering", shot_job_id=queue["job_id"], shot_count=queue["shot_count"], counts=self._shot_counts(queue["job_id"]), title=title, continuity_warnings=warnings)
             shot_job_id = checkpoint["shot_job_id"]
             title = checkpoint.get("title", episode_code)
 

@@ -12,6 +12,14 @@ from ..config import AppConfig
 from ..db import Database
 from ..paths import project_path, project_relative
 
+# A clip must be at least this long to carry enough prosody for voice cloning, and at most
+# this long to stay quick to review; picks are ranked by closeness to the target length and
+# spread at least MIN_PICK_SPACING_SECONDS apart so they don't all come from one scene.
+MIN_CLIP_SECONDS, MAX_CLIP_SECONDS = 3.0, 12.0
+TARGET_CLIP_SECONDS = 7.0
+MIN_PICK_SPACING_SECONDS = 120
+DEFAULT_PICK_LIMIT = 3
+
 
 @dataclass(frozen=True)
 class VoiceCandidateResult:
@@ -27,13 +35,13 @@ class VoiceCandidateService:
         self.config, self.database = config, database
 
     @staticmethod
-    def select_turns(turns: list[dict], limit: int = 3) -> list[dict]:
+    def select_turns(turns: list[dict], limit: int = DEFAULT_PICK_LIMIT) -> list[dict]:
         """Prefer medium-length clips and distribute picks across an episode."""
-        eligible = [turn for turn in turns if 3.0 <= turn["duration"] <= 12.0]
-        ranked = sorted(eligible, key=lambda turn: (abs(turn["duration"] - 7.0), turn["start_seconds"]))
+        eligible = [turn for turn in turns if MIN_CLIP_SECONDS <= turn["duration"] <= MAX_CLIP_SECONDS]
+        ranked = sorted(eligible, key=lambda turn: (abs(turn["duration"] - TARGET_CLIP_SECONDS), turn["start_seconds"]))
         selected: list[dict] = []
         for turn in ranked:
-            if all(abs(turn["start_seconds"] - prior["start_seconds"]) >= 120 for prior in selected):
+            if all(abs(turn["start_seconds"] - prior["start_seconds"]) >= MIN_PICK_SPACING_SECONDS for prior in selected):
                 selected.append(turn)
             if len(selected) == limit:
                 break
@@ -60,7 +68,7 @@ class VoiceCandidateService:
                 for index, turn in enumerate(selected, start=1):
                     target = target_dir / f"turn_{index:02d}_{turn['start_seconds']:.2f}.ogg"
                     self._extract(project_path(self.config.paths.project_root, audio["file_path"]), target, turn["start_seconds"], turn["duration"])
-                    quality = max(0.0, 1 - abs(turn["duration"] - 7.0) / 7.0)
+                    quality = max(0.0, 1 - abs(turn["duration"] - TARGET_CLIP_SECONDS) / TARGET_CLIP_SECONDS)
                     connection.execute(
                         "INSERT OR IGNORE INTO voice_sample_candidates(candidate_id,episode_id,speaker_segment_id,file_path,duration_seconds,quality_score) VALUES(?,?,?,?,?,?)",
                         (str(uuid.uuid4()), episode_id, turn["speaker_segment_id"], project_relative(self.config.paths.project_root, target), turn["duration"], quality),
