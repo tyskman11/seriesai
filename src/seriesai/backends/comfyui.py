@@ -52,6 +52,9 @@ class ComfyUIWorkflowBackend(VideoBackend):
         client_id = str(uuid.uuid4())
         defaults = {**self.RENDER_DEFAULTS, "steps": self.config.steps, "cfg": self.config.cfg}
         workflow = self._replace(template, {**defaults, **specification})
+        lora_name = specification.get("lora_name")
+        if lora_name:
+            workflow = self._inject_lora(workflow, lora_name)
         queued = self._post("/prompt", {"prompt": workflow, "client_id": f"seriesai-{client_id}"})
         prompt_id = queued.get("prompt_id")
         if not prompt_id:
@@ -83,6 +86,20 @@ class ComfyUIWorkflowBackend(VideoBackend):
                     return self._copy_output(asset, specification)
             time.sleep(self.config.poll_seconds)
         raise TimeoutError(f"ComfyUI did not complete shot within {self.config.timeout_seconds}s")
+
+    # Both bundled workflow templates feed the base model straight from node "1"
+    # (UnetLoaderGGUF) into node "11" (CFGGuider)'s "model" input. A trained character LoRA
+    # is spliced in between those two, without needing a separate LoRA-variant template file.
+    _CFGGUIDER_NODE, _BASE_MODEL_NODE = "11", "1"
+
+    def _inject_lora(self, workflow: dict, lora_name: str) -> dict:
+        guider = workflow.get(self._CFGGUIDER_NODE)
+        if not guider or guider.get("class_type") != "CFGGuider":
+            raise RuntimeError(f"Workflow template has no CFGGuider at node {self._CFGGUIDER_NODE}; cannot apply a LoRA.")
+        workflow = dict(workflow)
+        workflow["_lora_loader"] = {"class_type": "LoraLoaderModelOnly", "inputs": {"model": [self._BASE_MODEL_NODE, 0], "lora_name": lora_name, "strength_model": 1.0}}
+        workflow[self._CFGGUIDER_NODE] = {**guider, "inputs": {**guider["inputs"], "model": ["_lora_loader", 0]}}
+        return workflow
 
     def _replace(self, value, spec):
         # Keys starting with "_" are template comments (_readme, _note) that ComfyUI rejects.

@@ -34,6 +34,7 @@ from .services.character_dataset import CharacterDatasetService
 from .services.character_face_dataset import CharacterFaceDatasetService
 from .services.raw_video_cleanup import RawVideoCleanupService
 from .services.voice_training import VoiceTrainingService
+from .services.lora_training import LoraTrainingService
 from .services.timeline import TimelineService
 from .services.episode_commit import EpisodeCommitService
 from .services.voice_synthesis import VoiceSynthesisService
@@ -139,6 +140,11 @@ def build_parser() -> argparse.ArgumentParser:
     voice_train_parser.add_argument("--epochs", type=int, default=4)
     voice_train_parser.add_argument("--batch-size", type=int, default=1)
     voice_train_parser.add_argument("--grad-accum-steps", type=int, default=252)
+    video_clips_parser = subparsers.add_parser("prepare-video-clips", help="Cut short clips of a character's own scenes for video-LoRA training (needs the raw episode videos - run before cleanup-raw-video)")
+    video_clips_parser.add_argument("--character-id", required=True)
+    lora_train_parser = subparsers.add_parser("train-character-lora", help="Train an image or video LoRA for a character's identity (blocking, vendors ai-toolkit on first use; video LoRA is a VRAM experiment on this hardware, see docs)")
+    lora_train_parser.add_argument("--character-id", required=True)
+    lora_train_parser.add_argument("--kind", choices=["image", "video"], required=True)
     date_parser = subparsers.add_parser("set-episode-date", help="Set a canonical episode date and recalculate series intervals")
     date_parser.add_argument("episode_id")
     date_parser.add_argument("--date", required=True)
@@ -423,6 +429,14 @@ def main() -> None:
         db = Database(config.paths.series_root / "series.db")
         db.initialize(config.paths.project_root / "backups" / "migrations")
         print(json.dumps(VoiceTrainingService(config, db).train(args.character_id, args.epochs, args.batch_size, args.grad_accum_steps), ensure_ascii=False, indent=2))
+    elif args.command == "prepare-video-clips":
+        db = Database(config.paths.series_root / "series.db")
+        db.initialize(config.paths.project_root / "backups" / "migrations")
+        print(json.dumps(LoraTrainingService(config, db).prepare_video_clips(args.character_id), ensure_ascii=False, indent=2))
+    elif args.command == "train-character-lora":
+        db = Database(config.paths.series_root / "series.db")
+        db.initialize(config.paths.project_root / "backups" / "migrations")
+        print(json.dumps(LoraTrainingService(config, db).train(args.character_id, args.kind), ensure_ascii=False, indent=2))
     elif args.command == "set-episode-date":
         db = Database(config.paths.series_root / "series.db"); db.initialize(config.paths.project_root / "backups" / "migrations")
         print(json.dumps(TimelineService(db).set_episode_date(args.episode_id, args.date), ensure_ascii=False, indent=2))

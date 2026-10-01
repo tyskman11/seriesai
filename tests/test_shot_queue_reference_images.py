@@ -40,6 +40,19 @@ def test_create_attaches_the_scenes_first_reviewed_character_as_reference_image(
     assert spec["reference_image"] == "Series/voices_faces/a_001.jpg"
 
 
+def test_create_attaches_the_scenes_trained_lora_preferring_video_over_image(tmp_path):
+    database = _seeded_database(tmp_path)
+    with database.connect() as connection:
+        connection.execute("INSERT INTO model_registry(model_id,model_type,backend_name,local_path,active) VALUES('lora_image:a_001','lora_image','comfyui','a_001_image.safetensors',1)")
+        connection.execute("INSERT INTO model_registry(model_id,model_type,backend_name,local_path,active) VALUES('lora_video:a_001','lora_video','comfyui','a_001_video.safetensors',1)")
+    scenes = [{"sequence_number": 1, "location": "Studio", "character_ids": ["a_001"], "duration_seconds": 5, "purpose": "p", "conflict_or_turn": "c", "dialogue": []}]
+    outline_path = _outline(tmp_path, scenes)
+    result = ShotQueueService(_config(tmp_path), database).create(outline_path)
+    with database.connect() as connection:
+        spec = json.loads(connection.execute("SELECT checkpoint_json FROM generation_job_items WHERE job_id=?", (result["job_id"],)).fetchone()[0])
+    assert spec["lora_name"] == "a_001_video.safetensors"
+
+
 def test_create_skips_reference_image_when_no_scene_character_has_one(tmp_path):
     database = _seeded_database(tmp_path)
     scenes = [{"sequence_number": 1, "location": "Studio", "character_ids": ["b_001"], "duration_seconds": 5, "purpose": "p", "conflict_or_turn": "c", "dialogue": []}]

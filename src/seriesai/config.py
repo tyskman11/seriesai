@@ -12,6 +12,10 @@ class PathsConfig(BaseModel):
     series_root: Path
     comfyui: Path
     ffmpeg: str = "ffmpeg"
+    # Vendored on first use by lora_training.py (git clone + its own venv), not at every
+    # start.py launch - LoRA training is a deliberate, occasional, heavy action, not part of
+    # the normal daily run.
+    ai_toolkit: Path | None = None
 
 
 class HardwareConfig(BaseModel):
@@ -67,6 +71,20 @@ class PiperConfig(BaseModel):
     models_root: Path | None = None
 
 
+class TrainingConfig(BaseModel):
+    """Character-LoRA defaults, deliberately the most aggressive low-VRAM settings: this
+    project targets a 6GB card, far below the ~24GB ai-toolkit/diffusion-pipe recommend
+    for comfortable LTX-2 LoRA training. Lower quality/slower training trades for a chance
+    of fitting in VRAM at all; raise these only on a machine with real headroom."""
+    rank: int = Field(default=8, ge=1, le=128)
+    resolution: int = Field(default=512, ge=64, le=1024)
+    image_steps: int = Field(default=1500, ge=50)
+    video_steps: int = Field(default=1000, ge=50)
+    video_clip_frames: int = Field(default=25, ge=9, le=121)   # ~1s at 24fps; LTX's own default is 121 (5s)
+    learning_rate: float = Field(default=1e-4, gt=0)
+    batch_size: int = Field(default=1, ge=1)
+
+
 class ProcessingConfig(BaseModel):
     checkpoint_enabled: bool = True
     max_job_retries: int = Field(default=3, ge=0)
@@ -90,6 +108,7 @@ class AppConfig(BaseModel):
     ollama: OllamaConfig = OllamaConfig()
     comfyui_api: ComfyUIConfig = ComfyUIConfig()
     piper: PiperConfig = PiperConfig()
+    training: TrainingConfig = TrainingConfig()
     processing: ProcessingConfig = ProcessingConfig()
     localization: LocalizationConfig = LocalizationConfig()
 
@@ -103,6 +122,8 @@ def load_config(path: Path | str) -> AppConfig:
     config.paths.project_root = _resolve_path(base, config.paths.project_root)
     config.paths.series_root = _resolve_path(config.paths.project_root, config.paths.series_root)
     config.paths.comfyui = _resolve_path(config.paths.project_root, config.paths.comfyui)
+    if config.paths.ai_toolkit:
+        config.paths.ai_toolkit = _resolve_path(config.paths.project_root, config.paths.ai_toolkit)
     if config.comfyui_api.workflow_template:
         config.comfyui_api.workflow_template = _resolve_path(config.paths.project_root, config.comfyui_api.workflow_template)
     if config.comfyui_api.img2video_workflow_template:

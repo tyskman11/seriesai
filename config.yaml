@@ -9,6 +9,8 @@ paths:
   series_root: "Series"
   comfyui: "../ComfyUI_windows_portable/ComfyUI"
   ffmpeg: "ffmpeg"
+  # Vendored automatically (git clone + its own venv) the first time train-character-lora runs.
+  ai_toolkit: "runtime/ai-toolkit"
 
 hardware:
   gpu_vram_gb: 6
@@ -65,6 +67,17 @@ comfyui_api:
 piper:
   executable: "piper"
   models_root: null
+
+# Character-LoRA training defaults (image/video identity). Aggressively low-VRAM for this
+# 6GB card; ai-toolkit/diffusion-pipe normally recommend ~24GB for comfortable LTX-2 training.
+training:
+  rank: 8
+  resolution: 512
+  image_steps: 1500
+  video_steps: 1000
+  video_clip_frames: 25
+  learning_rate: 0.0001
+  batch_size: 1
 
 processing:
   checkpoint_enabled: true
