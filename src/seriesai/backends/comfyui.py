@@ -7,6 +7,7 @@ import time
 import uuid
 from collections.abc import Callable
 from pathlib import Path
+import socket
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -60,7 +61,13 @@ class ComfyUIWorkflowBackend(VideoBackend):
     def wait_for_prompt(self, prompt_id: str, specification: dict) -> str:
         deadline = time.monotonic() + self.config.timeout_seconds
         while time.monotonic() < deadline:
-            history = self._get(f"/history/{prompt_id}")
+            try:
+                history = self._get(f"/history/{prompt_id}")
+            except RuntimeError:
+                # A single slow/dropped poll shouldn't abort a render that may still be
+                # running for tens of minutes; just retry on the next tick.
+                time.sleep(self.config.poll_seconds)
+                continue
             # Some ComfyUI releases key history by internal prompt id. A query
             # with our id will be empty until the server has completed it.
             record = history.get(prompt_id) if isinstance(history, dict) else None
@@ -111,7 +118,7 @@ class ComfyUIWorkflowBackend(VideoBackend):
     def _get(self, endpoint: str) -> dict:
         try:
             with urlopen(self.base_url + endpoint, timeout=20) as response: return json.loads(response.read())
-        except (HTTPError, URLError, json.JSONDecodeError) as error: raise RuntimeError(f"ComfyUI API unavailable: {error}") from error
+        except (HTTPError, URLError, socket.timeout, json.JSONDecodeError) as error: raise RuntimeError(f"ComfyUI API unavailable: {error}") from error
 
     def _post(self, endpoint: str, payload: dict) -> dict:
         request = Request(self.base_url + endpoint, data=json.dumps(payload).encode(), headers={"Content-Type": "application/json"})
