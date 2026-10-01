@@ -391,6 +391,7 @@ def ensure_model_files() -> None:
         else:
             print(f"[Modelle] {label} geprueft: {target}", flush=True)
     ensure_face_detector_model()
+    ensure_face_recognizer_model()
 
 
 # opencv-python 5.x dropped cv2.CascadeClassifier/cv2.data.haarcascades; character-reference-image
@@ -407,6 +408,23 @@ def ensure_face_detector_model() -> None:
     print("[Modelle] Gesichtserkennung (YuNet): lade face_detection_yunet_2023mar.onnx (227 KB) ...", flush=True)
     if not download_verified(YUNET_URL, YUNET_PATH, YUNET_SIZE, YUNET_SHA256, "YuNet"):
         print("[Modelle] Gesichtserkennung (YuNet): Download fehlgeschlagen; naechster Start setzt fort.", flush=True)
+
+
+# SFace tells two detected faces apart (an embedding, not just "a face is here" like YuNet).
+# Used to find every frame of a specific character across a whole series automatically
+# for LoRA training data, instead of trusting a single hand-picked evidence frame.
+SFACE_URL = "https://github.com/opencv/opencv_zoo/raw/main/models/face_recognition_sface/face_recognition_sface_2021dec.onnx"
+SFACE_SIZE, SFACE_SHA256 = 38696353, "0ba9fbfa01b5270c96627c4ef784da859931e02f04419c829e83484087c34e79"
+SFACE_PATH = ROOT / "models" / "opencv" / "face_recognition_sface_2021dec.onnx"
+
+
+def ensure_face_recognizer_model() -> None:
+    if SFACE_PATH.is_file() and SFACE_PATH.stat().st_size == SFACE_SIZE and _sha256(SFACE_PATH) == SFACE_SHA256:
+        print(f"[Modelle] Gesichtswiedererkennung (SFace) geprueft: {SFACE_PATH}", flush=True); return
+    SFACE_PATH.unlink(missing_ok=True)
+    print("[Modelle] Gesichtswiedererkennung (SFace): lade face_recognition_sface_2021dec.onnx (37 MB) ...", flush=True)
+    if not download_verified(SFACE_URL, SFACE_PATH, SFACE_SIZE, SFACE_SHA256, "SFace"):
+        print("[Modelle] Gesichtswiedererkennung (SFace): Download fehlgeschlagen; naechster Start setzt fort.", flush=True)
 
 
 def _discover_once(port: int, timeout: float) -> str | None:

@@ -31,6 +31,7 @@ from .services.queue_worker import QueueWorkerService
 from .services.offscreen_life import OffscreenLifeService
 from .services.episode_editor import EpisodeEditorService
 from .services.character_dataset import CharacterDatasetService
+from .services.character_face_dataset import CharacterFaceDatasetService
 from .services.timeline import TimelineService
 from .services.episode_commit import EpisodeCommitService
 from .services.voice_synthesis import VoiceSynthesisService
@@ -123,6 +124,9 @@ def build_parser() -> argparse.ArgumentParser:
     editor_parser.add_argument("--episode-code", required=True, help="For example S04E01")
     dataset_parser = subparsers.add_parser("build-character-dataset", help="Build a character-only local LoRA dataset manifest from reviewed references")
     dataset_parser.add_argument("--character-id", required=True)
+    training_images_parser = subparsers.add_parser("collect-character-training-images", help="Find more identity-matched face crops of a character across the whole series for LoRA training (needs a reviewed reference face first)")
+    training_images_parser.add_argument("--character-id", required=True)
+    training_images_parser.add_argument("--target-count", type=int, default=40)
     date_parser = subparsers.add_parser("set-episode-date", help="Set a canonical episode date and recalculate series intervals")
     date_parser.add_argument("episode_id")
     date_parser.add_argument("--date", required=True)
@@ -391,6 +395,10 @@ def main() -> None:
         db = Database(config.paths.series_root / "series.db")
         db.initialize(config.paths.project_root / "backups" / "migrations")
         print(json.dumps(CharacterDatasetService(config, db).build(args.character_id), ensure_ascii=False, indent=2))
+    elif args.command == "collect-character-training-images":
+        db = Database(config.paths.series_root / "series.db")
+        db.initialize(config.paths.project_root / "backups" / "migrations")
+        print(json.dumps(CharacterFaceDatasetService(config, db).collect_training_images(args.character_id, args.target_count), ensure_ascii=False, indent=2))
     elif args.command == "set-episode-date":
         db = Database(config.paths.series_root / "series.db"); db.initialize(config.paths.project_root / "backups" / "migrations")
         print(json.dumps(TimelineService(db).set_episode_date(args.episode_id, args.date), ensure_ascii=False, indent=2))
