@@ -36,8 +36,10 @@ class VoiceSynthesisService:
     def _synthesize_xtts(self, character_id: str, text: str, output_path: Path) -> dict:
         with self.database.connect() as connection:
             profile = connection.execute("SELECT reference_dir FROM voice_profiles WHERE character_id=? AND backend_name='xtts'", (character_id,)).fetchone()
+            finetune = connection.execute("SELECT local_path FROM model_registry WHERE model_id=? AND active=1", (f"voice_finetune:{character_id}",)).fetchone()
         if not profile: raise ValueError("No reviewed voice reference for this character; run assign-voice and build-voice-references.")
         backend = getattr(self, "_xtts", None) or XttsVoiceBackend(self.config.paths.project_root / "models" / "tts" / "xtts_v2", self.config.localization.output_language)
         self._xtts = backend
-        result = backend.synthesize(text, self.config.paths.project_root / profile[0], output_path.resolve())
-        return {"character_id": character_id, "audio_path": result, "backend": "xtts"}
+        checkpoint_dir = self.config.paths.project_root / finetune["local_path"] if finetune else None
+        result = backend.synthesize(text, self.config.paths.project_root / profile[0], output_path.resolve(), checkpoint_dir=checkpoint_dir)
+        return {"character_id": character_id, "audio_path": result, "backend": "xtts", "finetuned": checkpoint_dir is not None}

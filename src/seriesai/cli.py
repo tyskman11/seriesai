@@ -33,6 +33,7 @@ from .services.episode_editor import EpisodeEditorService
 from .services.character_dataset import CharacterDatasetService
 from .services.character_face_dataset import CharacterFaceDatasetService
 from .services.raw_video_cleanup import RawVideoCleanupService
+from .services.voice_training import VoiceTrainingService
 from .services.timeline import TimelineService
 from .services.episode_commit import EpisodeCommitService
 from .services.voice_synthesis import VoiceSynthesisService
@@ -131,6 +132,13 @@ def build_parser() -> argparse.ArgumentParser:
     cleanup_parser = subparsers.add_parser("cleanup-raw-video", help="Delete one episode's raw imported video to save disk space, only once nothing still needs it. Without --confirm, only reports whether it's safe.")
     cleanup_parser.add_argument("--episode-id", required=True)
     cleanup_parser.add_argument("--confirm", action="store_true", help="Actually delete; omit to dry-run the safety checks only.")
+    voice_dataset_parser = subparsers.add_parser("prepare-voice-training-data", help="Cut every approved voice-cluster segment of a character into XTTS fine-tune training clips")
+    voice_dataset_parser.add_argument("--character-id", required=True)
+    voice_train_parser = subparsers.add_parser("train-voice", help="Fine-tune XTTS-v2's GPT layer on a character's approved voice clusters (blocking, GPU-heavy; see docs on VRAM requirements)")
+    voice_train_parser.add_argument("--character-id", required=True)
+    voice_train_parser.add_argument("--epochs", type=int, default=4)
+    voice_train_parser.add_argument("--batch-size", type=int, default=1)
+    voice_train_parser.add_argument("--grad-accum-steps", type=int, default=252)
     date_parser = subparsers.add_parser("set-episode-date", help="Set a canonical episode date and recalculate series intervals")
     date_parser.add_argument("episode_id")
     date_parser.add_argument("--date", required=True)
@@ -407,6 +415,14 @@ def main() -> None:
         db = Database(config.paths.series_root / "series.db")
         db.initialize(config.paths.project_root / "backups" / "migrations")
         print(json.dumps(RawVideoCleanupService(config, db).cleanup(args.episode_id, args.confirm), ensure_ascii=False, indent=2))
+    elif args.command == "prepare-voice-training-data":
+        db = Database(config.paths.series_root / "series.db")
+        db.initialize(config.paths.project_root / "backups" / "migrations")
+        print(json.dumps(VoiceTrainingService(config, db).prepare_dataset(args.character_id), ensure_ascii=False, indent=2))
+    elif args.command == "train-voice":
+        db = Database(config.paths.series_root / "series.db")
+        db.initialize(config.paths.project_root / "backups" / "migrations")
+        print(json.dumps(VoiceTrainingService(config, db).train(args.character_id, args.epochs, args.batch_size, args.grad_accum_steps), ensure_ascii=False, indent=2))
     elif args.command == "set-episode-date":
         db = Database(config.paths.series_root / "series.db"); db.initialize(config.paths.project_root / "backups" / "migrations")
         print(json.dumps(TimelineService(db).set_episode_date(args.episode_id, args.date), ensure_ascii=False, indent=2))

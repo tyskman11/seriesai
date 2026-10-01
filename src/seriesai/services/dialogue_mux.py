@@ -40,11 +40,16 @@ class DialogueMuxService:
             rows = connection.execute("SELECT character_id,reference_dir FROM voice_profiles WHERE backend_name='xtts'").fetchall()
         return {row[0]: self.config.paths.project_root / row[1] for row in rows}
 
+    def _finetune_checkpoint(self, character_id: str) -> Path | None:
+        with self.database.connect() as connection:
+            row = connection.execute("SELECT local_path FROM model_registry WHERE model_id=? AND active=1", (f"voice_finetune:{character_id}",)).fetchone()
+        return self.config.paths.project_root / row["local_path"] if row else None
+
     def _render_line(self, character_id: str, text: str, reference_dir: Path, scratch: Path) -> np.ndarray | None:
         import soundfile
         target = scratch / f"{character_id}_{abs(hash(text)) % 10**8}.wav"
         try:
-            self._xtts.synthesize(text, reference_dir, target)
+            self._xtts.synthesize(text, reference_dir, target, checkpoint_dir=self._finetune_checkpoint(character_id))
         except (FileNotFoundError, RuntimeError):
             return None
         wave, rate = soundfile.read(str(target), dtype="float32")

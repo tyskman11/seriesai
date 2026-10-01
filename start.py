@@ -347,7 +347,8 @@ PYTHON_STACK = [
 ]
 # Model files fetched straight into the project (size and SHA-256 come from the Hugging Face API).
 HF_MODELS = [
-    ("XTTS-v2", "coqui/XTTS-v2", ["config.json", "vocab.json", "speakers_xtts.pth", "mel_stats.pth", "model.pth"], ROOT / "models" / "tts" / "xtts_v2"),
+    # dvae.pth is only needed for voice_training.py's XTTS fine-tuning, not plain zero-shot cloning.
+    ("XTTS-v2", "coqui/XTTS-v2", ["config.json", "vocab.json", "speakers_xtts.pth", "mel_stats.pth", "model.pth", "dvae.pth"], ROOT / "models" / "tts" / "xtts_v2"),
     ("ECAPA", "speechbrain/spkrec-ecapa-voxceleb", ["hyperparams.yaml", "embedding_model.ckpt", "mean_var_norm_emb.ckpt", "classifier.ckpt", "label_encoder.txt"], ROOT / "models" / "speechbrain" / "spkrec-ecapa-voxceleb"),
 ]
 
