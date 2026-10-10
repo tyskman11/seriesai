@@ -88,8 +88,17 @@ def configured_work_intensity() -> str:
     return intensity if intensity in {"eco", "balanced", "full"} else "full"
 
 
+def configured_gpu_vram_gb() -> int:
+    match = re.search(r"(?ms)^hardware:\s*(.*?)(?=^[A-Za-z_]+:|\Z)", (ROOT / "config.yaml").read_text(encoding="utf-8"))
+    value = re.search(r"^\s*gpu_vram_gb:\s*(\d+)", match.group(1), re.MULTILINE) if match else None
+    return int(value.group(1)) if value else 6
+
+
 def comfyui_args_for_intensity(intensity: str) -> list[str]:
     base = ["--windows-standalone-build", "--disable-auto-launch", "--enable-manager"]
+    # --normalvram keeps whole model blocks resident; on a small card (the 22B LTX needs far more
+    # than 6-8 GB) that fails to start or OOMs, so small GPUs always stay on --lowvram.
+    if configured_gpu_vram_gb() <= 12 and intensity == "full": return base + ["--lowvram", "--reserve-vram", "0.5"]
     # eco: leave the machine usable for other things while it renders. full: use the GPU as
     # hard as this card allows. balanced keeps today's long-standing default behaviour.
     if intensity == "eco": return base + ["--lowvram", "--reserve-vram", "2"]
@@ -173,6 +182,7 @@ class Supervisor:
 
 SUPERVISOR = Supervisor()
 COMFYUI_URL = "http://127.0.0.1:8188"
+COMFYUI_WATCHDOG = False   # enabled by main() once this terminal owns the local render stack
 
 
 def configured_comfyui_root() -> Path | None:
@@ -194,6 +204,17 @@ def ensure_comfyui() -> None:
     intensity = configured_work_intensity()
     print(f"[ComfyUI] Arbeitsintensitaet: {intensity}", flush=True)
     SUPERVISOR.spawn("ComfyUI", [str(python), "-s", "ComfyUI/main.py", *comfyui_args_for_intensity(intensity)], root)
+
+
+def comfyui_watchdog() -> None:
+    """Called every monitor tick: start ComfyUI only if it neither answers nor is already being
+    started by this terminal (it takes a while to answer after spawn)."""
+    if configured_video_backend() != "comfyui": return
+    child = SUPERVISOR.children.get("ComfyUI")
+    if child is not None and child.poll() is None: return
+    if request_json(f"{COMFYUI_URL}/system_stats"): return
+    print("[ComfyUI] laeuft nicht - starte es.", flush=True)
+    ensure_comfyui()
 
 
 def ensure_local_render_worker(master_url: str, client_id: str) -> None:
@@ -477,6 +498,7 @@ def monitor(url: str, interval: float, client_id: str, mode: str) -> None:
     try:
         while True:
             SUPERVISOR.check(url)
+            if COMFYUI_WATCHDOG: comfyui_watchdog()
             status = request_json(f"{url}/status"); stamp = time.strftime("%H:%M:%S")
             if not status:
                 print(f"[{stamp}] Warte auf den Koordinator ...", flush=True)
@@ -504,6 +526,7 @@ def monitor(url: str, interval: float, client_id: str, mode: str) -> None:
 
 
 def main() -> None:
+    global COMFYUI_WATCHDOG
     if hasattr(sys.stdout, "reconfigure"): sys.stdout.reconfigure(line_buffering=True, errors="replace")
     parser = argparse.ArgumentParser(description="Start or join SeriesAI and keep the live monitor visible.")
     parser.add_argument("--host", default="0.0.0.0")
@@ -547,6 +570,7 @@ def main() -> None:
         print(f"SeriesAI laeuft bereits (PID {status['pid']}, Worker {status['workers']}).", flush=True)
     if not args.no_render_worker:
         ensure_comfyui()
+        COMFYUI_WATCHDOG = True
         ensure_local_render_worker(monitor_url, client_id)
     monitor(monitor_url, max(1.0, args.refresh_seconds), client_id, mode)
 
