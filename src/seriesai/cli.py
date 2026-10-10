@@ -30,6 +30,7 @@ from .services.shot_queue import ShotQueueService
 from .services.queue_worker import QueueWorkerService
 from .services.offscreen_life import OffscreenLifeService
 from .services.episode_editor import EpisodeEditorService
+from .logging_config import configure_logging, get_logger
 from .services.character_dataset import CharacterDatasetService
 from .services.character_face_dataset import CharacterFaceDatasetService
 from .services.raw_video_cleanup import RawVideoCleanupService
@@ -183,9 +184,20 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main() -> None:
-    parser = build_parser()
-    args = parser.parse_args()
+    args = build_parser().parse_args()
     config = load_config(args.config)
+    configure_logging(config.paths.project_root / "logs")
+    log = get_logger("cli")
+    log.info("Befehl gestartet: %s", args.command)
+    try:
+        _run(args, config)
+    except Exception:
+        log.exception("Befehl fehlgeschlagen: %s", args.command)
+        raise
+    log.info("Befehl beendet: %s", args.command)
+
+
+def _run(args, config) -> None:
     if args.command in {"init-db", "init"}:
         db = Database(config.paths.series_root / "series.db")
         db.initialize(config.paths.project_root / "backups" / "migrations")

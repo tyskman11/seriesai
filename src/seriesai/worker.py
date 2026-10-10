@@ -13,6 +13,9 @@ from urllib.request import Request, urlopen
 
 from .backends.comfyui import ComfyUIWorkflowBackend
 from .config import load_config
+from .logging_config import configure_logging, get_logger
+
+log = get_logger("worker")
 
 
 def request_json(url: str, payload: dict | None = None) -> dict:
@@ -48,13 +51,13 @@ def run(master_url: str, worker_id: str, config_path: Path, poll_seconds: float,
     backend = ComfyUIWorkflowBackend(config.comfyui_api, config.paths.comfyui, config.paths.project_root)
     base = master_url.rstrip("/")
     intensity_pause = INTENSITY_PAUSE_SECONDS.get(intensity, 0.0)
-    print(f"[Worker] {worker_id} wartet auf lokale ComfyUI-Shots von {base} (Arbeitsintensitaet: {intensity})", flush=True)
+    log.info(f"{worker_id} wartet auf lokale ComfyUI-Shots von {base} (Arbeitsintensitaet: {intensity})")
     while True:
         try:
             status = request_json(base + "/status")
             node = next((x for x in status.get("worker_nodes", []) if x.get("id") == worker_id), None)
             if node and node.get("role") == "coordinator-only":
-                print("[Worker] Rolle coordinator-only: Rendering pausiert.", flush=True); time.sleep(max(5, poll_seconds)); continue
+                log.info(f"Rolle coordinator-only: Rendering pausiert."); time.sleep(max(5, poll_seconds)); continue
             inflight = request_json(base + "/render-queue/worker/" + worker_id + "/inflight").get("item")
             if inflight:
                 item_id, spec = inflight["item_id"], inflight["specification"]
@@ -64,35 +67,35 @@ def run(master_url: str, worker_id: str, config_path: Path, poll_seconds: float,
                     # Do not claim a second shot. This item predates prompt-id
                     # persistence or was interrupted before submission; a
                     # coordinator recovery will return it to retry safely.
-                    print(f"[Worker] Wartet auf Wiederherstellung von reserviertem Shot {spec.get('sequence_number')}.", flush=True)
+                    log.info(f"Wartet auf Wiederherstellung von reserviertem Shot {spec.get('sequence_number')}.")
                     time.sleep(max(5, poll_seconds)); continue
-                print(f"[Worker] Setze lokalen ComfyUI-Auftrag für Shot {spec.get('sequence_number')} fort …", flush=True)
+                log.info(f"Setze lokalen ComfyUI-Auftrag für Shot {spec.get('sequence_number')} fort …")
                 try:
                     local_output = Path(backend.wait_for_prompt(prompt_id, spec))
                     result = upload(base + "/render-queue/items/" + item_id + "/upload", worker_id, local_output)
-                    print(f"[Worker] Wiederhergestellter Shot fertig: {result.get('output_path', local_output)}", flush=True)
+                    log.info(f"Wiederhergestellter Shot fertig: {result.get('output_path', local_output)}")
                 except Exception as error:
                     request_json(base + "/render-queue/items/" + item_id + "/fail", {"worker_id": worker_id, "error": str(error), "retry": True})
-                    print(f"[Worker] Wiederhergestellter Shot fehlgeschlagen: {error}", flush=True)
+                    log.error(f"Wiederhergestellter Shot fehlgeschlagen: {error}")
                 if intensity_pause: time.sleep(intensity_pause)
                 continue
             claimed = request_json(base + "/render-queue/claim-next", {"worker_id": worker_id}).get("item")
             if not claimed:
                 time.sleep(poll_seconds); continue
             item_id, spec = claimed["item_id"], claimed["specification"]
-            print(f"[Worker] Render {claimed['job_id']} / Shot {spec.get('sequence_number')} …", flush=True)
+            log.info(f"Render {claimed['job_id']} / Shot {spec.get('sequence_number')} …")
             try:
                 def submitted(prompt_id: str) -> None:
                     request_json(base + "/render-queue/items/" + item_id + "/submission", {"worker_id": worker_id, "backend": "comfyui", "prompt_id": prompt_id})
                 local_output = Path(backend.render_shot(spec, on_submitted=submitted))
                 result = upload(base + "/render-queue/items/" + item_id + "/upload", worker_id, local_output)
-                print(f"[Worker] Shot fertig: {result.get('output_path', local_output)}", flush=True)
+                log.info(f"Shot fertig: {result.get('output_path', local_output)}")
             except Exception as error:
                 request_json(base + "/render-queue/items/" + item_id + "/fail", {"worker_id": worker_id, "error": str(error), "retry": True})
-                print(f"[Worker] Shot fehlgeschlagen, Retry gespeichert: {error}", flush=True)
+                log.error(f"Shot fehlgeschlagen, Retry gespeichert: {error}")
             if intensity_pause: time.sleep(intensity_pause)
         except (HTTPError, URLError, OSError, json.JSONDecodeError) as error:
-            print(f"[Worker] Koordinator/Netzwerk nicht erreichbar: {error}", flush=True)
+            log.error(f"Koordinator/Netzwerk nicht erreichbar: {error}")
             time.sleep(max(5, poll_seconds))
 
 
@@ -103,7 +106,9 @@ def main() -> None:
     parser.add_argument("--config", type=Path, default=Path("config.yaml"))
     parser.add_argument("--poll-seconds", type=float, default=4.0)
     parser.add_argument("--intensity", choices=["eco", "balanced", "full"], default="full")
-    args = parser.parse_args(); run(args.master, args.worker_id, args.config, max(.5, args.poll_seconds), args.intensity)
+    args = parser.parse_args()
+    configure_logging(Path(args.config).resolve().parent / "logs")
+    run(args.master, args.worker_id, args.config, max(.5, args.poll_seconds), args.intensity)
 
 
 if __name__ == "__main__": main()

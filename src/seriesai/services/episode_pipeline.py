@@ -22,6 +22,7 @@ from typing import Callable
 
 from ..config import AppConfig
 from ..db import Database
+from ..logging_config import get_logger
 from .continuity_checker import ContinuityChecker
 from .dialogue_mux import DialogueMuxService
 from .episode_editor import EpisodeEditorService
@@ -60,6 +61,7 @@ class EpisodePipelineService:
         def report(stage: str, **detail: object) -> None:
             checkpoint.update(stage=stage, **detail)
             self._save(job_id, series_id, payload, checkpoint, "running")
+            get_logger("episode_pipeline").info("Episode %s: Schritt %s", episode_code, stage)
             if progress: progress(stage, detail)
 
         try:
@@ -192,4 +194,4 @@ class EpisodePipelineService:
             except Exception as error:
                 # Already recorded on the job row by run(); still log it here so a string of
                 # failures is visible in the terminal instead of disappearing silently.
-                print(f"[EpisodePipeline] Job {job_id} ({series_id}) fehlgeschlagen: {error}", flush=True)
+                get_logger("episode_pipeline").error("Job %s (%s) fehlgeschlagen: %s", job_id, series_id, error, exc_info=True)

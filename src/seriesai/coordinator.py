@@ -21,6 +21,7 @@ from .services.character_review import CharacterReviewService
 from .services.relationship_review import RelationshipReviewService
 from .services.profile_review import ProfileReviewService
 from .config import load_config
+from .logging_config import configure_logging, get_logger
 from .services.render_readiness import render_readiness
 
 LOCAL_ADDRESSES = {"127.0.0.1", "::1"}
@@ -900,9 +901,9 @@ def run_stale_worker_recovery(coordinator: "Coordinator", timeout_seconds: float
             from .services.queue_worker import QueueWorkerService
             result = QueueWorkerService(Database(database)).recover_for_workers(stale)
             if result["recovered_items"]:
-                print(f"[Koordinator] {result['recovered_items']} Shot(s) von inaktiven Workern {stale} automatisch zur Wiederholung freigegeben.", flush=True)
+                get_logger("coordinator").info(f"{result['recovered_items']} Shot(s) von inaktiven Workern {stale} automatisch zur Wiederholung freigegeben.")
         except Exception as error:
-            print(f"[Koordinator] Automatische Worker-Wiederherstellung fehlgeschlagen: {error}", flush=True)
+            get_logger("coordinator").error(f"Automatische Worker-Wiederherstellung fehlgeschlagen: {error}")
 
 
 def run_episode_queue(coordinator: "Coordinator") -> None:
@@ -919,11 +920,14 @@ def run_episode_queue(coordinator: "Coordinator") -> None:
                 coordinator.set_job("generate_episode", "running", {"stage": stage, **detail})
             service.run_forever(report)
         except Exception:
+            get_logger("episode_queue").exception("Episoden-Warteschlange: Fehler, neuer Versuch in 5 s")
             time.sleep(5)  # keep the queue worker alive even if one iteration raises unexpectedly
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(); parser.add_argument("--host", default="127.0.0.1"); parser.add_argument("--port", default=8765, type=int); args = parser.parse_args()
+    configure_logging(Path.cwd() / "logs")
+    get_logger("coordinator").info("Koordinator startet auf %s:%s", args.host, args.port)
     start_discovery_responder(args.host, args.port)
     coordinator = Coordinator(args.host, args.port)
     threading.Thread(target=run_episode_queue, args=(coordinator,), daemon=True).start()
