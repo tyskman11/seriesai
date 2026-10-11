@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 
 from pydantic import BaseModel, Field
 
-from ..backends.ollama import OllamaBackend
+from ..backends.llamacpp import LlamaCppBackend
 from ..config import AppConfig
 from ..db import Database
 
@@ -35,11 +35,11 @@ class SemanticAnalysisService:
             done = connection.execute("SELECT status FROM analysis_runs WHERE episode_id=? AND stage_name=?", (episode_id, self.stage)).fetchone()
         if done and done[0] == "completed": return {"episode_id": episode_id, "status": "already_analyzed", "events": 0}
         if not row or not row[2]: raise ValueError("Completed transcript required")
-        if not self.config.ollama.model: raise RuntimeError("No Ollama model configured")
+        if not self.config.llm.enabled: raise RuntimeError("Local LLM disabled (llm.enabled: false)")
         self._stage(episode_id, "running", {})
         try:
             prompt = "Analysiere dieses deutsche Episodentranskript. Extrahiere nur belegbare, wichtige Serienereignisse. Erfinde keine Fakten.\n\n" + row[2][:120000]
-            output = OllamaBackend(self.config.ollama.base_url, self.config.ollama.model, timeout_seconds=self.config.ollama.timeout_seconds).structured_generate(prompt, SemanticOutput, system="Du bist ein praeziser Serienkontinuitaets-Analyst.")
+            output = LlamaCppBackend(self.config.llm.base_url, self.config.llm.model_name, timeout_seconds=self.config.llm.timeout_seconds).structured_generate(prompt, SemanticOutput, system="Du bist ein praeziser Serienkontinuitaets-Analyst.")
             occurred_at = row[1] or datetime.now(timezone.utc).isoformat()
             with self.database.connect() as connection:
                 for event in output.events:

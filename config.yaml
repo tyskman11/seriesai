@@ -7,7 +7,7 @@ role: auto
 paths:
   project_root: "."
   series_root: "Series"
-  comfyui: "../ComfyUI_windows_portable/ComfyUI"
+  comfyui: "../00 - DO NOT LIST/ComfyUI_windows_portable/ComfyUI"
   ffmpeg: "ffmpeg"
   # Vendored automatically (git clone + its own venv) the first time train-character-lora runs.
   ai_toolkit: "runtime/ai-toolkit"
@@ -28,7 +28,7 @@ hardware:
 models:
   transcription_backend: whisperx
   vision_backend: null
-  llm_backend: ollama
+  llm_backend: llamacpp
   tts_backend: xtts   # cloned original voices (XTTS-v2), reviewed via assign-voice
   video_backend: comfyui
 
@@ -39,12 +39,16 @@ transcription:
   compute_type: "int8"
   beam_size: 5
 
-ollama:
-  # Project-local Ollama (runtime/ollama, models in models/ollama) on its own port,
-  # so it never collides with a system-wide Ollama on 11434. Started by start.py.
+llm:
+  # Project-local llama.cpp server (runtime/llamacpp) on its own port; started by start.py.
+  # Models are plain GGUF files in models/llm - drop any GGUF there (or set model_file) to switch.
   base_url: "http://127.0.0.1:11435"
-  # Local German-capable analysis model (6.6 GB); runs on 6 GB VRAM with CPU offload.
-  model: "qwen3.5:9b"
+  model_file: null        # null = newest *.gguf in models/llm
+  # Auto-downloaded (size + SHA-256 checked) when models/llm has no GGUF yet:
+  hf_repo: "unsloth/Qwen3-8B-GGUF"
+  hf_file: "Qwen3-8B-Q4_K_M.gguf"
+  ctx_size: 16384
+  gpu_layers: 99
   timeout_seconds: 1200   # generous: CPU fallback under concurrent GPU render load is slow
 
 # Optional local ComfyUI API renderer. Keep video_backend null until a local

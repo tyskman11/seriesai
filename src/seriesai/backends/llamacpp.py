@@ -1,4 +1,4 @@
-"""Local-only Ollama backend with validated structured output."""
+"""Local-only llama.cpp backend (llama-server, OpenAI-compatible API) with validated structured output."""
 from __future__ import annotations
 
 import json
@@ -10,21 +10,26 @@ from pydantic import BaseModel, ValidationError
 from .base import LLMBackend
 
 
-class OllamaBackend(LLMBackend):
-    def __init__(self, base_url: str, model: str, retries: int = 2, timeout_seconds: int = 1200) -> None:
-        # A large default: under GPU contention with a concurrent ComfyUI render, Ollama
+class LlamaCppBackend(LLMBackend):
+    def __init__(self, base_url: str, model: str = "local", retries: int = 2, timeout_seconds: int = 1200) -> None:
+        # A large default: under GPU contention with a concurrent ComfyUI render, llama.cpp
         # can fall back to slow CPU decoding for a multi-billion-parameter model.
         self.base_url, self.model, self.retries, self.timeout_seconds = base_url.rstrip("/"), model, retries, timeout_seconds
 
     def generate(self, prompt: str, *, system: str | None = None) -> str:
-        payload = {"model": self.model, "prompt": prompt, "stream": False, "think": False}
-        if system: payload["system"] = system
-        return self._request(payload)["response"]
+        return self._request(self._payload(prompt, system))["response"]
+
+    @staticmethod
+    def _payload(prompt: str, system: str | None, **extra: Any) -> dict[str, Any]:
+        messages = ([{"role": "system", "content": system}] if system else []) + [{"role": "user", "content": prompt}]
+        # enable_thinking=False: Qwen3-style templates otherwise emit a long <think> block first.
+        return {"messages": messages, "stream": False, "chat_template_kwargs": {"enable_thinking": False}, **extra}
 
     def _request(self, payload: dict[str, Any]) -> dict[str, Any]:
-        request = Request(f"{self.base_url}/api/generate", data=json.dumps(payload).encode(), headers={"Content-Type": "application/json"})
+        """POST to llama-server; returns {"response": <assistant text>} (the shape the callers expect)."""
+        request = Request(f"{self.base_url}/v1/chat/completions", data=json.dumps({"model": self.model, **payload}).encode(), headers={"Content-Type": "application/json"})
         with urlopen(request, timeout=self.timeout_seconds) as response:
-            return json.loads(response.read())
+            return {"response": json.loads(response.read())["choices"][0]["message"]["content"] or ""}
 
     def structured_generate(self, prompt: str, schema: type[Any], *, system: str | None = None) -> Any:
         if not issubclass(schema, BaseModel):
@@ -39,15 +44,14 @@ class OllamaBackend(LLMBackend):
         last_error: Exception | None = None
         for _ in range(self.retries + 1):
             try:
-                payload: dict[str, Any] = {"model": self.model, "prompt": prompt + "\n\n" + instruction,
-                                           "stream": False, "think": False, "format": json_schema, "options": {"temperature": 0.15}}
-                if system: payload["system"] = system
+                payload = self._payload(prompt + "\n\n" + instruction, system, temperature=0.15,
+                                        response_format={"type": "json_schema", "json_schema": {"name": schema.__name__, "schema": json_schema}})
                 response = self._request(payload)["response"].strip()
                 if response.startswith("```"):
                     response = response.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
                 return schema.model_validate_json(response)
             except (json.JSONDecodeError, ValidationError, KeyError) as error: last_error = error
-        raise RuntimeError(f"Invalid Ollama JSON after {self.retries + 1} attempts: {last_error}")
+        raise RuntimeError(f"Invalid llama.cpp JSON after {self.retries + 1} attempts: {last_error}")
 
     def summarize(self, text: str) -> str: return self.generate("Fasse auf Deutsch zusammen:\n" + text)
 

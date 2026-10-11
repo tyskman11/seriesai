@@ -8,7 +8,7 @@ from pathlib import Path
 
 from pydantic import BaseModel, Field, model_validator
 
-from ..backends.ollama import OllamaBackend
+from ..backends.llamacpp import LlamaCppBackend
 from ..config import AppConfig
 from ..db import Database
 from ..paths import project_relative
@@ -129,8 +129,8 @@ class EpisodePlannerService:
 
     def plan(self, series_id: str, idea: str, target_duration_minutes: float, notes: str | None = None, job_id: str | None = None,
              character_ids: list[str] | None = None, crossover_series_id: str | None = None, crossover_character_ids: list[str] | None = None) -> dict:
-        if not self.config.ollama.model:
-            raise RuntimeError("No local Ollama model configured.")
+        if not self.config.llm.enabled:
+            raise RuntimeError("Local LLM disabled (llm.enabled: false).")
         if not idea.strip():
             raise ValueError("episode idea cannot be empty")
         target_seconds = int(target_duration_minutes * 60)
@@ -176,7 +176,7 @@ class EpisodePlannerService:
             f"Idee: {idea}\nOptionale Hinweise: {notes or '-'}\n\nKOMPAKTER SERIES-BRAIN-KONTEXT:\n" + json.dumps(prompt_context, ensure_ascii=False)
         )
         try:
-            outline = OllamaBackend(self.config.ollama.base_url, self.config.ollama.model, timeout_seconds=self.config.ollama.timeout_seconds).structured_generate(prompt, EpisodeOutline, system="Du bist ein deutscher Serienautor mit strenger Kontinuitaetsdisziplin.")
+            outline = LlamaCppBackend(self.config.llm.base_url, self.config.llm.model_name, timeout_seconds=self.config.llm.timeout_seconds).structured_generate(prompt, EpisodeOutline, system="Du bist ein deutscher Serienautor mit strenger Kontinuitaetsdisziplin.")
             outline = self.normalize_draft(outline, context, target_seconds)
             issues = self.validate(outline, context, target_seconds)
             directory = self.config.paths.series_root / "Generated" / "drafts" / job_id

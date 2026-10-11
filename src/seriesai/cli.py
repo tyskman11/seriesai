@@ -71,7 +71,7 @@ def build_parser() -> argparse.ArgumentParser:
     transcript_parser.add_argument("episode_id")
     transcript_folder_parser = subparsers.add_parser("transcribe-series", help="Transcribe all locally ready episodes in series order")
     transcript_folder_parser.add_argument("--series-id", required=True)
-    semantic_parser = subparsers.add_parser("analyze-semantics", help="Analyze one completed transcript using local Ollama")
+    semantic_parser = subparsers.add_parser("analyze-semantics", help="Analyze one completed transcript using the local llama.cpp model")
     semantic_parser.add_argument("episode_id")
     semantic_series_parser = subparsers.add_parser("analyze-series-semantics", help="Create resumable Series-Brain event summaries for every completed transcript")
     semantic_series_parser.add_argument("--series-id", required=True)
@@ -213,7 +213,7 @@ def _run(args, config) -> None:
             "ffmpeg": shutil.which(config.paths.ffmpeg) is not None,
             "comfyui": config.paths.comfyui.is_dir(),
             "custom_nodes": (config.paths.comfyui / "custom_nodes").is_dir(),
-            "ollama": _local_service_available(config.ollama.base_url),
+            "llm": _local_service_available(config.llm.base_url),
             "database_schema_version": db.schema_version(),
             "configured_backends": config.models.model_dump(),
             "render_readiness": render_readiness(config),
@@ -458,10 +458,10 @@ def _run(args, config) -> None:
 
 
 def _local_service_available(url: str) -> bool:
-    """No cloud fallback: probe only the configured loopback Ollama endpoint."""
+    """No cloud fallback: probe only the configured loopback llama-server endpoint."""
     try:
         from urllib.request import urlopen
-        with urlopen(f"{url.rstrip('/')}/api/tags", timeout=2) as response:
+        with urlopen(f"{url.rstrip('/')}/health", timeout=2) as response:
             return response.status == 200
     except OSError:
         return False

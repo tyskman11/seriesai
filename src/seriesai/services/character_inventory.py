@@ -8,7 +8,7 @@ import uuid
 
 from pydantic import BaseModel, Field
 
-from ..backends.ollama import OllamaBackend
+from ..backends.llamacpp import LlamaCppBackend
 from ..config import AppConfig
 from ..db import Database
 
@@ -67,7 +67,7 @@ class CharacterInventoryService:
             "Die evidence-Eintraege muessen konkrete Episoden-IDs oder kurze belegbare Hinweise enthalten.\n\n"
             + source[:110_000]
         )
-        output = OllamaBackend(self.config.ollama.base_url, self.config.ollama.model, timeout_seconds=self.config.ollama.timeout_seconds).structured_generate(
+        output = LlamaCppBackend(self.config.llm.base_url, self.config.llm.model_name, timeout_seconds=self.config.llm.timeout_seconds).structured_generate(
             prompt, CharacterInventoryOutput, system="Du bist ein vorsichtiger deutscher Serienkontinuitaets-Archivist."
         )
         candidates = output.candidates or self._recurring_name_candidates(evidence)

@@ -45,10 +45,20 @@ class TranscriptionConfig(BaseModel):
     beam_size: int = Field(default=5, ge=1, le=10)
 
 
-class OllamaConfig(BaseModel):
+class LlmConfig(BaseModel):
+    """Local llama.cpp server (llama-server). Any GGUF dropped into models/llm can be used."""
+    enabled: bool = True
     base_url: str = "http://127.0.0.1:11435"
-    model: str | None = None
+    model_file: str | None = None   # file name inside models/llm; None = newest *.gguf there
+    hf_repo: str | None = None      # downloaded into models/llm on start if no model is present
+    hf_file: str | None = None
+    ctx_size: int = Field(default=16384, ge=512)
+    gpu_layers: int = Field(default=99, ge=0)   # llama.cpp offloads what fits; lower it for small GPUs
     timeout_seconds: int = Field(default=1200, ge=1)  # generous: CPU fallback under concurrent GPU render load is slow
+
+    @property
+    def model_name(self) -> str:
+        return self.model_file or "local"
 
 
 class ComfyUIConfig(BaseModel):
@@ -105,7 +115,7 @@ class AppConfig(BaseModel):
     hardware: HardwareConfig
     models: ModelsConfig
     transcription: TranscriptionConfig = TranscriptionConfig()
-    ollama: OllamaConfig = OllamaConfig()
+    llm: LlmConfig = LlmConfig()
     comfyui_api: ComfyUIConfig = ComfyUIConfig()
     piper: PiperConfig = PiperConfig()
     training: TrainingConfig = TrainingConfig()
