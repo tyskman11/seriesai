@@ -2,7 +2,7 @@
 app.py - Modell-Downloader fuer das SeriesAI ComfyUI-Video-Backend (LTX-2.3 GGUF).
 
 Laedt alle fuer das LTX-2.3-Template benoetigten Modelldateien direkt von
-HuggingFace in die richtigen ComfyUI-Modellordner (sibling ComfyUI_windows_portable).
+HuggingFace in die richtigen ComfyUI-Modellordner (Pfad aus paths.comfyui in config.yaml).
 
 Eigenschaften:
 - Resumable: bereits vollstaendig heruntergeladene Dateien werden uebersprungen
@@ -22,6 +22,7 @@ Aufruf:
 from __future__ import annotations
 
 import argparse
+import re
 import sys
 import time
 import urllib.request
@@ -29,7 +30,16 @@ import urllib.error
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent
-COMFYUI_MODELS = (PROJECT_ROOT / ".." / "ComfyUI_windows_portable" / "ComfyUI" / "models").resolve()
+
+
+def _configured_comfyui() -> Path:
+    """paths.comfyui aus config.yaml, relativ zum Projektroot (nie ein globaler Pfad)."""
+    text = (PROJECT_ROOT / "config.yaml").read_text(encoding="utf-8")
+    value = re.search(r"^\s*comfyui:\s*[\"']?([^\"'#\r\n]+?)[\"']?\s*(?:#.*)?$", text, re.MULTILINE)
+    return (PROJECT_ROOT / value.group(1)).resolve()
+
+
+COMFYUI_MODELS = _configured_comfyui() / "models"
 
 # (huggingface_repo, datei_im_repo, ziel_unterordner, ziel_dateiname)
 MODELS = [
@@ -116,7 +126,7 @@ def main() -> int:
 
     if not COMFYUI_MODELS.exists():
         print(f"FEHLER: ComfyUI-Modellordner nicht gefunden unter {COMFYUI_MODELS}")
-        print("Erwartet wird ComfyUI_windows_portable als Sibling-Ordner von SeriesAI (siehe config.yaml).")
+        print("Erwartet wird der Ordner aus paths.comfyui in config.yaml (relativ zum Projektroot).")
         return 1
 
     print(f"ComfyUI-Modellordner: {COMFYUI_MODELS}\n")

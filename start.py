@@ -25,6 +25,13 @@ from urllib.request import Request, urlopen
 
 
 ROOT = Path(__file__).resolve().parent
+
+# Keine globalen Verzeichnisse: Caches und Temp-Dateien liegen im Projekt (werden an alle Unterprozesse vererbt).
+_LOCAL = ROOT / "runtime" / "cache"
+for _name, _sub in (("HF_HOME", "huggingface"), ("TORCH_HOME", "torch"), ("TTS_HOME", "tts"), ("XDG_CACHE_HOME", "xdg"),
+                    ("PIP_CACHE_DIR", "pip"), ("TMP", "tmp"), ("TEMP", "tmp"), ("TMPDIR", "tmp")):
+    (_LOCAL / _sub).mkdir(parents=True, exist_ok=True)
+    os.environ[_name] = str(_LOCAL / _sub)
 VENV = ROOT / ".venv"
 PORT = 8765
 DISCOVERY_PORT = 8766
@@ -190,6 +197,58 @@ def configured_comfyui_root() -> Path | None:
     match = re.search(r"(?ms)^paths:\s*(.*?)(?=^[A-Za-z_]+:|\Z)", (ROOT / "config.yaml").read_text(encoding="utf-8"))
     value = re.search(r"^\s*comfyui:\s*[\"']?([^\"'#\r\n]+?)[\"']?\s*(?:#.*)?$", match.group(1), re.MULTILINE) if match else None
     return (ROOT / value.group(1)).resolve().parent if value else None
+
+
+COMFYUI_RELEASE_API = "https://api.github.com/repos/comfyanonymous/ComfyUI/releases/latest"
+COMFYUI_ASSET = "ComfyUI_windows_portable_nvidia.7z"
+COMFYUI_CUSTOM_NODES = [("ComfyUI-GGUF", "https://github.com/city96/ComfyUI-GGUF"), ("ComfyUI-KJNodes", "https://github.com/kijai/ComfyUI-KJNodes")]
+
+
+def _pip_install(python: Path, *packages: str) -> bool:
+    return subprocess.run([str(python), "-m", "pip", "install", *packages], cwd=ROOT).returncode == 0
+
+
+def ensure_comfyui_install() -> None:
+    """Install the portable ComfyUI (and its video custom nodes/models) at ``paths.comfyui`` when missing.
+
+    Everything lands at the project-relative configured location; each step is skipped once done.
+    """
+    if configured_video_backend() != "comfyui": return
+    root = configured_comfyui_root()
+    if not root or os.name != "nt": return
+    python = root / "python_embeded" / "python.exe"
+    if not python.exists():
+        print(f"[ComfyUI] Nicht gefunden; installiere die portable Version nach {root} ...", flush=True)
+        release = request_json(COMFYUI_RELEASE_API)
+        asset = next((a for a in (release or {}).get("assets", []) if a.get("name") == COMFYUI_ASSET), None)
+        if not asset or not str(asset.get("digest", "")).startswith("sha256:"):
+            print("[ComfyUI] Release-Informationen nicht abrufbar; spaeter erneut versuchen.", flush=True); return
+        archive = ROOT / "runtime" / "downloads" / COMFYUI_ASSET
+        if not download_verified(asset["browser_download_url"], archive, int(asset["size"]), asset["digest"][7:], "ComfyUI"):
+            print("[ComfyUI] Download fehlgeschlagen; naechster Start setzt fort.", flush=True); return
+        if not _modules_available(["py7zr"]) and not _pip_install(venv_python(), "py7zr"):
+            print("[ComfyUI] py7zr konnte nicht installiert werden.", flush=True); return
+        print("[ComfyUI] Entpacke (dauert einige Minuten) ...", flush=True)
+        staging = root.with_name(root.name + ".staging")
+        shutil.rmtree(staging, ignore_errors=True); staging.mkdir(parents=True)
+        code = "import py7zr,sys;py7zr.SevenZipFile(sys.argv[1]).extractall(sys.argv[2])"
+        if subprocess.run([str(venv_python()), "-c", code, str(archive), str(staging)]).returncode != 0:
+            print("[ComfyUI] Entpacken fehlgeschlagen; Archiv wird neu geladen.", flush=True); archive.unlink(missing_ok=True); return
+        inner = staging / "ComfyUI_windows_portable"
+        shutil.rmtree(root, ignore_errors=True); (inner if inner.exists() else staging).replace(root); shutil.rmtree(staging, ignore_errors=True)
+        archive.unlink(missing_ok=True)
+        if not python.exists(): print("[ComfyUI] Installation unvollstaendig.", flush=True); return
+    nodes = root / "ComfyUI" / "custom_nodes"
+    for name, url in COMFYUI_CUSTOM_NODES:
+        if (nodes / name).exists(): continue
+        print(f"[ComfyUI] Installiere Custom Node {name} ...", flush=True)
+        if subprocess.run(["git", "clone", "--depth", "1", url, str(nodes / name)]).returncode != 0:
+            print(f"[ComfyUI] {name} konnte nicht geklont werden (Git/Netz?).", flush=True); continue
+        requirements = nodes / name / "requirements.txt"
+        if requirements.exists(): _pip_install(python, "-r", str(requirements))
+    if not any((root / "ComfyUI" / "models" / "unet").glob("*.gguf")):
+        print("[ComfyUI] Lade Videomodelle (app.py) ...", flush=True)
+        subprocess.run([str(venv_python()), str(ROOT / "app.py")], cwd=ROOT)
 
 
 def ensure_comfyui() -> None:
@@ -569,6 +628,7 @@ def main() -> None:
     else:
         print(f"SeriesAI laeuft bereits (PID {status['pid']}, Worker {status['workers']}).", flush=True)
     if not args.no_render_worker:
+        if not args.no_install: ensure_comfyui_install()
         ensure_comfyui()
         COMFYUI_WATCHDOG = True
         ensure_local_render_worker(monitor_url, client_id)

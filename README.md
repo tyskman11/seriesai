@@ -4,7 +4,7 @@ SeriesAI is a **local-first, resumable** system for building a persistent “Ser
 
 ## Portability
 
-The project uses paths relative to its own root. `config.yaml` resolves `.` as the project directory, `Series` as the data directory, and ComfyUI as a sibling portable folder. SQLite stores source, cache, artifact, and transcript paths relative to the project root. Move the entire `SeriesAI` folder together with its sibling `ComfyUI_windows_portable` folder without editing global drive paths.
+The project uses paths relative to its own root. `config.yaml` resolves `.` as the project directory, `Series` as the data directory, and ComfyUI as the portable folder `..\00 - DO NOT LIST\ComfyUI_windows_portable`. SQLite stores source, cache, artifact, and transcript paths relative to the project root. Move the entire `SeriesAI` folder together with the `00 - DO NOT LIST` folder without editing global drive paths.
 
 Status: the local analysis, review, planning, continuity, shot-queue, assembly, explicit-commit and ComfyUI-wrapper foundations are implemented. Video, vision, and TTS backends remain deliberately unconfigured until suitable local models are selected for the available hardware.
 
@@ -43,7 +43,7 @@ python start.py
 ComfyUI remains separate. SeriesAI adds only this wrapper package to the sibling installation:
 
 ```text
-..\ComfyUI_windows_portable\ComfyUI\custom_nodes\SeriesAI\
+..\00 - DO NOT LIST\ComfyUI_windows_portable\ComfyUI\custom_nodes\SeriesAI\
 ```
 
 Before creating or changing any pre-existing ComfyUI file, SeriesAI development creates a timestamped backup beside the original. The nodes call the `src\seriesai` package; business logic does not live in a ComfyUI graph. Available nodes cover loading, import, analysis, character/relationship state, timeline, review-only off-screen simulation, drafting, continuity checks, shot queues, assembly, and explicit commit.
