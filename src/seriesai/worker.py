@@ -52,9 +52,13 @@ def run(master_url: str, worker_id: str, config_path: Path, poll_seconds: float,
     base = master_url.rstrip("/")
     intensity_pause = INTENSITY_PAUSE_SECONDS.get(intensity, 0.0)
     log.info(f"{worker_id} wartet auf lokale ComfyUI-Shots von {base} (Arbeitsintensitaet: {intensity})")
+    outage = 0
     while True:
         try:
             status = request_json(base + "/status")
+            if outage:
+                log.info(f"Koordinator wieder erreichbar (nach {outage} Fehlversuchen).")
+                outage = 0
             node = next((x for x in status.get("worker_nodes", []) if x.get("id") == worker_id), None)
             if node and node.get("role") == "coordinator-only":
                 log.info(f"Rolle coordinator-only: Rendering pausiert."); time.sleep(max(5, poll_seconds)); continue
@@ -95,8 +99,10 @@ def run(master_url: str, worker_id: str, config_path: Path, poll_seconds: float,
                 log.error(f"Shot fehlgeschlagen, Retry gespeichert: {error}")
             if intensity_pause: time.sleep(intensity_pause)
         except (HTTPError, URLError, OSError, json.JSONDecodeError) as error:
-            log.error(f"Koordinator/Netzwerk nicht erreichbar: {error}")
-            time.sleep(max(5, poll_seconds))
+            outage += 1
+            if outage & (outage - 1) == 0:   # log attempts 1, 2, 4, 8 ... instead of every poll
+                log.error(f"Koordinator/Netzwerk nicht erreichbar (Versuch {outage}): {error}")
+            time.sleep(min(60, max(5, poll_seconds) * outage))
 
 
 def main() -> None:

@@ -59,9 +59,10 @@ class EpisodePipelineService:
         checkpoint = dict(resume_checkpoint or {})
 
         def report(stage: str, **detail: object) -> None:
+            changed = checkpoint.get("stage") != stage
             checkpoint.update(stage=stage, **detail)
             self._save(job_id, series_id, payload, checkpoint, "running")
-            get_logger("episode_pipeline").info("Episode %s: Schritt %s", episode_code, stage)
+            if changed: get_logger("episode_pipeline").info("Episode %s: Schritt %s", episode_code, stage)
             if progress: progress(stage, detail)
 
         try:
