@@ -1,23 +1,31 @@
-from .importer import EpisodeImporter, ImportResult
-from .scene_detection import SceneDetectionResult, SceneDetectionService
-from .transcription import TranscriptionResult, TranscriptionService
-from .character_inventory import CharacterInventoryService
-from .character_review import CharacterReviewService
-from .speech_turns import SpeechTurnService
-from .voice_candidates import VoiceCandidateService
-from .character_reference_images import CharacterReferenceImageService
-from .episode_planner import EpisodePlannerService
-from .character_profiles import CharacterProfileService
-from .relationship_proposals import RelationshipProposalService
-from .relationship_review import RelationshipReviewService
-from .continuity_checker import ContinuityChecker
-from .shot_queue import ShotQueueService
-from .queue_worker import QueueWorkerService
-from .offscreen_life import OffscreenLifeService
-from .episode_editor import EpisodeEditorService
-from .character_dataset import CharacterDatasetService
-from .episode_commit import EpisodeCommitService
-from .profile_review import ProfileReviewService
-from .voice_synthesis import VoiceSynthesisService
+"""Lazy service exports so optional AI backends do not block the dashboard."""
+from __future__ import annotations
 
-__all__ = ["CharacterDatasetService", "CharacterInventoryService", "CharacterProfileService", "CharacterReferenceImageService", "CharacterReviewService", "ContinuityChecker", "EpisodeCommitService", "EpisodeEditorService", "EpisodeImporter", "EpisodePlannerService", "ImportResult", "OffscreenLifeService", "ProfileReviewService", "QueueWorkerService", "RelationshipProposalService", "RelationshipReviewService", "SceneDetectionResult", "SceneDetectionService", "ShotQueueService", "SpeechTurnService", "TranscriptionResult", "TranscriptionService", "VoiceCandidateService", "VoiceSynthesisService"]
+from importlib import import_module
+
+_EXPORTS = {
+    "EpisodeImporter": ("importer", "EpisodeImporter"), "ImportResult": ("importer", "ImportResult"),
+    "SceneDetectionResult": ("scene_detection", "SceneDetectionResult"), "SceneDetectionService": ("scene_detection", "SceneDetectionService"),
+    "TranscriptionResult": ("transcription", "TranscriptionResult"), "TranscriptionService": ("transcription", "TranscriptionService"),
+    "CharacterInventoryService": ("character_inventory", "CharacterInventoryService"), "CharacterReviewService": ("character_review", "CharacterReviewService"),
+    "SpeechTurnService": ("speech_turns", "SpeechTurnService"), "VoiceCandidateService": ("voice_candidates", "VoiceCandidateService"),
+    "CharacterReferenceImageService": ("character_reference_images", "CharacterReferenceImageService"), "EpisodePlannerService": ("episode_planner", "EpisodePlannerService"),
+    "CharacterProfileService": ("character_profiles", "CharacterProfileService"), "RelationshipProposalService": ("relationship_proposals", "RelationshipProposalService"),
+    "RelationshipReviewService": ("relationship_review", "RelationshipReviewService"), "ContinuityChecker": ("continuity_checker", "ContinuityChecker"),
+    "ShotQueueService": ("shot_queue", "ShotQueueService"), "QueueWorkerService": ("queue_worker", "QueueWorkerService"),
+    "OffscreenLifeService": ("offscreen_life", "OffscreenLifeService"), "EpisodeEditorService": ("episode_editor", "EpisodeEditorService"),
+    "CharacterDatasetService": ("character_dataset", "CharacterDatasetService"), "EpisodeCommitService": ("episode_commit", "EpisodeCommitService"),
+    "ProfileReviewService": ("profile_review", "ProfileReviewService"), "VoiceSynthesisService": ("voice_synthesis", "VoiceSynthesisService"),
+}
+
+__all__ = sorted(_EXPORTS)
+
+
+def __getattr__(name: str):
+    try:
+        module_name, attribute = _EXPORTS[name]
+    except KeyError as error:
+        raise AttributeError(name) from error
+    value = getattr(import_module(f"{__name__}.{module_name}"), attribute)
+    globals()[name] = value
+    return value

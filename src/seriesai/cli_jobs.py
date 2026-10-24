@@ -21,6 +21,16 @@ JOBS_DIR = Path.cwd() / "runtime" / "cli_jobs"
 POSITIONAL, STORE_TRUE, STORE_VALUE = "positional", "store_true", "store_value"
 
 
+def normalize_nas_path(value: str) -> str:
+    """Return a project-relative NAS path, rejecting every other filesystem."""
+    root = Path.cwd().resolve()
+    candidate = Path(value)
+    resolved = (root / candidate).resolve() if not candidate.is_absolute() else candidate.resolve()
+    if resolved != root and root not in resolved.parents:
+        raise ValueError("Path must be selected from the local NAS project share.")
+    return resolved.relative_to(root).as_posix() if resolved != root else "."
+
+
 def _venv_python() -> Path:
     root = Path.cwd()
     candidate = root / ".venv" / ("Scripts/python.exe" if sys.platform == "win32" else "bin/python")
@@ -63,6 +73,8 @@ def start(command: str, values: dict[str, str]) -> dict:
         if value in (None, ""):
             if arg["required"]: raise ValueError(f"Missing required argument: {arg['flag'] or arg['dest']}")
             continue
+        if arg["type"] == "path":
+            value = normalize_nas_path(str(value))
         if arg["kind"] == POSITIONAL:
             argv.append(str(value))
         else:

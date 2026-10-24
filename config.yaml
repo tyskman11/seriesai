@@ -1,9 +1,3 @@
-# role: auto (default) lets this machine become the coordinator if it's the first one up on
-# the network, or a worker if it finds one already running. Set to worker-only on every
-# machine except the main one to guarantee it NEVER self-elects as coordinator, regardless
-# of startup timing - the reliable way to make "client 2 and onward" always a worker.
-role: auto
-
 paths:
   project_root: "."
   series_root: "Series"
@@ -26,8 +20,8 @@ hardware:
   worker_timeout_seconds: 90
 
 models:
-  transcription_backend: whisperx
-  vision_backend: null
+  transcription_backend: faster_whisper
+  vision_backend: llamacpp
   llm_backend: llamacpp
   tts_backend: xtts   # cloned original voices (XTTS-v2), reviewed via assign-voice
   video_backend: comfyui
@@ -50,6 +44,18 @@ llm:
   ctx_size: 16384
   gpu_layers: 99
   timeout_seconds: 1200   # generous: CPU fallback under concurrent GPU render load is slow
+
+# Separater lokaler Vision-Dienst fuer Bild- und Video-Keyframes. Die Dateien werden beim
+# SeriesAI-Setup direkt vom angegebenen Repository geladen, fortgesetzt und per SHA-256 geprueft.
+# gpu_layers: 0 ist auf dem 6-GB-NAS bewusst CPU-sicher, damit Text-LLM und Render-Worker nicht abstuerzen.
+vision:
+  enabled: true
+  base_url: "http://127.0.0.1:11436"
+  hf_repo: "ggml-org/Qwen2.5-VL-3B-Instruct-GGUF"
+  model_file: "Qwen2.5-VL-3B-Instruct-Q4_K_M.gguf"
+  mmproj_file: "mmproj-Qwen2.5-VL-3B-Instruct-Q8_0.gguf"
+  ctx_size: 4096
+  gpu_layers: 0
 
 # Optional local ComfyUI API renderer. Keep video_backend null until a local
 # API workflow template has been exported and configured here.

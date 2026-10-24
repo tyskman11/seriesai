@@ -8,6 +8,7 @@ project is local-only and never needs a batch/PowerShell/admin launcher.
 from __future__ import annotations
 
 import argparse
+import atexit
 import json
 import os
 import socket
@@ -25,6 +26,92 @@ from urllib.request import Request, urlopen
 
 
 ROOT = Path(__file__).resolve().parent
+INSTANCE_LOCK = ROOT / "runtime" / "seriesai.start.lock"
+
+
+def _lock_owner() -> int | None:
+    try:
+        return int(INSTANCE_LOCK.read_text(encoding="utf-8").strip().splitlines()[0].split("=", 1)[1])
+    except (OSError, IndexError, ValueError):
+        return None
+
+
+def _pid_running(pid: int | None) -> bool:
+    if not pid or pid == os.getpid():
+        return pid == os.getpid()
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    return True
+
+
+def _lock_started_at() -> float | None:
+    try:
+        values = dict(line.split("=", 1) for line in INSTANCE_LOCK.read_text(encoding="utf-8").splitlines() if "=" in line)
+        return float(values.get("started", ""))
+    except (OSError, ValueError):
+        return None
+
+
+def _dashboard_listening() -> bool:
+    """A living PID alone is not a valid SeriesAI instance after a failed restart."""
+    try:
+        with socket.create_connection(("127.0.0.1", PORT), timeout=1):
+            return True
+    except OSError:
+        return False
+
+
+def _is_our_start_process(pid: int) -> bool:
+    """Only terminate a stale lock owner when Linux proves it is this launcher."""
+    if os.name == "nt":
+        return False
+    try:
+        command = Path(f"/proc/{pid}/cmdline").read_bytes().decode("utf-8", "replace")
+        return "start.py" in command and "SeriesAI" in command
+    except OSError:
+        return False
+
+
+def acquire_instance_lock() -> bool:
+    """Ensure a NAS restart cannot run two model downloaders at once."""
+    INSTANCE_LOCK.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        handle = os.open(INSTANCE_LOCK, os.O_WRONLY | os.O_CREAT | os.O_EXCL)
+    except FileExistsError:
+        owner = _lock_owner()
+        # A controlled os.execv restart retains its PID and the lock file.
+        # It is the same monitor, not a competing launcher.
+        if owner == os.getpid():
+            return True
+        lock_age = time.time() - (_lock_started_at() or time.time())
+        if _pid_running(owner) and _dashboard_listening():
+            print(f"[Start] SeriesAI laeuft bereits (PID {owner}); zweiter Start wird beendet.", flush=True)
+            return False
+        if _pid_running(owner) and lock_age >= 120 and _is_our_start_process(owner):
+            print(f"[Start] Hängengebliebenen SeriesAI-Start (PID {owner}, ohne Dashboard) wird beendet.", flush=True)
+            try:
+                os.kill(owner, 15)
+            except OSError:
+                pass
+            for _ in range(20):
+                if not _pid_running(owner):
+                    break
+                time.sleep(0.25)
+        if _pid_running(owner):
+            print(f"[Start] SeriesAI-Start (PID {owner}) antwortet nicht; Sperre bleibt zum Schutz vor Doppelstarts.", flush=True)
+            return False
+        INSTANCE_LOCK.unlink(missing_ok=True)
+        return acquire_instance_lock()
+    with os.fdopen(handle, "w", encoding="utf-8") as lock:
+        lock.write(f"pid={os.getpid()}\nstarted={time.time()}\n")
+    return True
+
+
+def release_instance_lock() -> None:
+    if _lock_owner() == os.getpid():
+        INSTANCE_LOCK.unlink(missing_ok=True)
 
 # Keine globalen Verzeichnisse: Caches und Temp-Dateien liegen im Projekt (werden an alle Unterprozesse vererbt).
 _LOCAL = ROOT / "runtime" / "cache"
@@ -32,9 +119,80 @@ for _name, _sub in (("HF_HOME", "huggingface"), ("TORCH_HOME", "torch"), ("TTS_H
                     ("PIP_CACHE_DIR", "pip"), ("TMP", "tmp"), ("TEMP", "tmp"), ("TMPDIR", "tmp")):
     (_LOCAL / _sub).mkdir(parents=True, exist_ok=True)
     os.environ[_name] = str(_LOCAL / _sub)
-VENV = ROOT / ".venv"
-PORT = 8765
-DISCOVERY_PORT = 8766
+
+
+# ---- portabler Python (python-build-standalone): liegt im Projekt bzw. im gemeinsamen runtime-Ordner, nie in einer globalen Installation ----
+PORTABLE_PY_MINOR = "3.11"      # 3.10-3.12 haben fuer alle KI-Pakete (torch, coqui-tts ...) Wheels
+
+
+def portable_python() -> Path | None:
+    exe = "python.exe" if os.name == "nt" else "bin/python3"
+    for base in (ROOT / "runtime" / "python", ROOT.parent.parent / "runtime" / "python"):   # projekteigen, sonst gemeinsam im Pool-Ordner
+        if (base / exe).exists() and (base / ".install_complete").exists(): return base / exe   # Marker: nur vollstaendig entpackte Installationen
+    return None
+
+
+def ensure_portable_python() -> Path | None:
+    """Gibt den portablen Python zurueck; fehlt er, wird er einmalig (mit SHA-256-Pruefung) geladen. None = offline/fehlgeschlagen."""
+    import hashlib, json, tarfile, urllib.request
+    found = portable_python()
+    if found: return found
+    platform_tag = "x86_64-pc-windows-msvc" if os.name == "nt" else ("aarch64-apple-darwin" if sys.platform == "darwin" else "x86_64-unknown-linux-gnu")
+    target = ROOT.parent.parent / "runtime" / "python" if ROOT.parent.name == "projects" else ROOT / "runtime" / "python"
+    try:
+        request = urllib.request.Request("https://api.github.com/repos/astral-sh/python-build-standalone/releases/latest", headers={"User-Agent": "portable-python"})
+        with urllib.request.urlopen(request, timeout=30) as response: release = json.load(response)
+        pattern = re.compile(rf"^cpython-{re.escape(PORTABLE_PY_MINOR)}\.\d+\+\d+-{platform_tag}-install_only\.tar\.gz$")
+        asset = next(a for a in release["assets"] if pattern.match(a["name"]))
+        digest = str(asset.get("digest", ""))
+        if not digest.startswith("sha256:"): raise RuntimeError("Release ohne Pruefsumme")
+        archive = ROOT / "runtime" / "downloads" / asset["name"]
+        archive.parent.mkdir(parents=True, exist_ok=True)
+        print(f"[Python] Lade portables Python {PORTABLE_PY_MINOR} ({asset['size'] >> 20} MB) nach {target} ...", flush=True)
+        sha = hashlib.sha256()
+        with urllib.request.urlopen(asset["browser_download_url"], timeout=60) as response, archive.open("wb") as out:
+            while chunk := response.read(1 << 20): out.write(chunk); sha.update(chunk)
+        if sha.hexdigest() != digest[7:]: archive.unlink(missing_ok=True); raise RuntimeError("Pruefsumme stimmt nicht")
+        staging = target.with_name("python.staging")
+        shutil.rmtree(staging, ignore_errors=True)
+        skipped = 0
+        with tarfile.open(archive) as bundle:
+            members = bundle.getmembers()
+            for number, member in enumerate(members, 1):      # einzeln entpacken: auf Netzlaufwerken scheitert gelegentlich eine Datei (z. B. leere .lock-Dateien)
+                if number % 250 == 0: print(f"[Python] Entpacke ... {number}/{len(members)} Dateien", flush=True)
+                for attempt in range(3):
+                    try:
+                        bundle.extract(member, staging, filter="data") if hasattr(tarfile, "data_filter") else bundle.extract(member, staging)
+                        break
+                    except PermissionError:
+                        if attempt == 2:
+                            if not member.name.endswith(".lock"): skipped += 1
+                            break
+                        time.sleep(1)
+        if skipped or not (staging / "python" / ("python.exe" if os.name == "nt" else "bin/python3")).exists():
+            raise RuntimeError(f"Entpacken unvollstaendig ({skipped} Dateien nicht schreibbar; laeuft ein Virenscanner/anderer Prozess auf dem Ziel?)")
+        archive.unlink(missing_ok=True)
+        shutil.rmtree(target, ignore_errors=True)
+        for attempt in range(5):   # Netzlaufwerke/Virenscanner halten frisch entpackte Ordner kurz fest
+            try: (staging / "python").replace(target); break
+            except PermissionError:
+                if attempt == 4: shutil.move(str(staging / "python"), str(target))
+                else: time.sleep(2)
+        shutil.rmtree(staging, ignore_errors=True)
+        if not portable_python():
+            shutil.rmtree(target, ignore_errors=True); raise RuntimeError("python nach dem Verschieben nicht vorhanden")
+        (target / ".install_complete").write_text("ok", encoding="utf-8")
+        if not portable_python():
+            shutil.rmtree(target, ignore_errors=True); raise RuntimeError("Marker konnte nicht geschrieben werden")
+        print("[Python] Portabler Python bereit.", flush=True)
+    except Exception as error:  # noqa: BLE001 - offline o. ae.: Aufrufer weicht auf den startenden Python aus
+        print(f"[Python] Portabler Python nicht verfuegbar ({type(error).__name__}: {error}); verwende den startenden Python.", flush=True)
+        return None
+    return portable_python()
+# The NAS host can create a Linux ``.venv`` in this shared project.  It cannot
+# run on Windows, so never reuse or overwrite it from the Windows launcher.
+VENV = ROOT / (".venv-windows" if os.name == "nt" else ".venv")
+PORT = 8770          # lokales Dashboard (ASMRAI 8780, MusicAI 8790); der All-for-One-Hub ist der Koordinator
 
 
 def venv_python() -> Path:
@@ -49,7 +207,10 @@ def bootstrap() -> None:
     python = venv_python()
     if not python.exists():
         print("[Vorbereitung] Erstelle die lokale Python-Umgebung ...", flush=True)
-        subprocess.run([sys.executable, "-m", "venv", str(VENV)], check=True)
+        # A locally installed interpreter is sufficient to create the small
+        # project venv.  Do not block the dashboard behind a first-run runtime
+        # download; the portable runtime remains an optional fallback.
+        subprocess.run([str(portable_python() or sys.executable), "-m", "venv", str(VENV)], check=True)
         print("[Vorbereitung] Installation wird beim ersten Analysejob automatisch vervollstaendigt.", flush=True)
 
     # Never re-launch Python here.  A .py double click must retain its one
@@ -71,13 +232,23 @@ def request_json(url: str, payload: dict | None = None) -> dict | None:
         return None
 
 
-def configured_ollama_model() -> str | None:
-    """Read the small Ollama section without requiring a second Python environment."""
-    match = re.search(r"(?ms)^ollama:\s*(.*?)(?=^[A-Za-z_]+:|\Z)", (ROOT / "config.yaml").read_text(encoding="utf-8"))
-    if not match:
-        return None
-    model = re.search(r'^\s*model:\s*["\']?([^"\'\s#]+)', match.group(1), re.MULTILINE)
-    return model.group(1) if model else None
+def llm_settings() -> dict[str, str]:
+    """Read the flat llm: section of config.yaml without requiring a second Python environment."""
+    match = re.search(r"(?ms)^llm:\s*(.*?)(?=^[A-Za-z_]+:|\Z)", (ROOT / "config.yaml").read_text(encoding="utf-8"))
+    values: dict[str, str] = {}
+    for key, value in re.findall(r'^\s+([a-z_]+):\s*["\']?([^"\'\s#]+)', match.group(1) if match else "", re.MULTILINE):
+        values[key] = value
+    return {k: v for k, v in values.items() if v.lower() not in ("null", "~")}
+
+
+def flat_settings(section: str) -> dict[str, str]:
+    """Read a simple top-level config section without importing the project venv."""
+    text = (ROOT / "config.yaml").read_text(encoding="utf-8")
+    match = re.search(rf"(?ms)^{re.escape(section)}:\s*(.*?)(?=^[A-Za-z_]+:|\Z)", text)
+    values: dict[str, str] = {}
+    for key, value in re.findall(r'^\s+([a-z_]+):\s*["\']?([^"\'\s#]+)', match.group(1) if match else "", re.MULTILINE):
+        values[key] = value
+    return {k: v for k, v in values.items() if v.lower() not in ("null", "~")}
 
 
 def configured_video_backend() -> str | None:
@@ -102,7 +273,7 @@ def configured_gpu_vram_gb() -> int:
 
 
 def comfyui_args_for_intensity(intensity: str) -> list[str]:
-    base = ["--windows-standalone-build", "--disable-auto-launch", "--enable-manager"]
+    base = ["--windows-standalone-build", "--disable-auto-launch"]   # ohne --enable-manager: der Manager braucht pip/uv, das die portable Installation nicht hat (Absturz beim Start)
     # --normalvram keeps whole model blocks resident; on a small card (the 22B LTX needs far more
     # than 6-8 GB) that fails to start or OOMs, so small GPUs always stay on --lowvram.
     if configured_gpu_vram_gb() <= 12 and intensity == "full": return base + ["--lowvram", "--reserve-vram", "0.5"]
@@ -235,7 +406,7 @@ def ensure_comfyui_install() -> None:
         if subprocess.run([str(venv_python()), "-c", code, str(archive), str(staging)]).returncode != 0:
             print("[ComfyUI] Entpacken fehlgeschlagen; Archiv wird neu geladen.", flush=True); archive.unlink(missing_ok=True); return
         inner = staging / "ComfyUI_windows_portable"
-        shutil.rmtree(root, ignore_errors=True); (inner if inner.exists() else staging).replace(root); shutil.rmtree(staging, ignore_errors=True)
+        replace_dir(inner if inner.exists() else staging, root); shutil.rmtree(staging, ignore_errors=True)
         archive.unlink(missing_ok=True)
         if not python.exists(): print("[ComfyUI] Installation unvollstaendig.", flush=True); return
     nodes = root / "ComfyUI" / "custom_nodes"
@@ -251,11 +422,24 @@ def ensure_comfyui_install() -> None:
         subprocess.run([str(venv_python()), str(ROOT / "app.py")], cwd=ROOT)
 
 
+def comfyui_process_exists() -> bool:
+    """True while any ComfyUI main.py process is alive, also one still booting (slow network drives take minutes)."""
+    if os.name != "nt": return False
+    command = "(@(Get-CimInstance Win32_Process | Where-Object { $_.Name -like 'python*' -and $_.CommandLine -like '*ComfyUI*main.py*' })).Count"
+    try:
+        out = subprocess.run(["powershell", "-NoProfile", "-Command", command], capture_output=True, text=True, timeout=30).stdout.strip()
+        return out.isdigit() and int(out) > 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
 def ensure_comfyui() -> None:
     """Start the local ComfyUI server inside this terminal unless it already answers."""
     if configured_video_backend() != "comfyui": return
     if request_json(f"{COMFYUI_URL}/system_stats"):
         print("[ComfyUI] laeuft bereits.", flush=True); return
+    if comfyui_process_exists():
+        print("[ComfyUI] ein Prozess startet bereits (z. B. durch ein anderes Projekt) - klinke mich ein, sobald er antwortet.", flush=True); return
     root = configured_comfyui_root()
     python = root / "python_embeded" / "python.exe" if root else None
     if not python or not python.exists():
@@ -293,16 +477,22 @@ def ensure_local_render_worker(master_url: str, client_id: str) -> None:
     state.write_text(json.dumps({"pid": worker.pid, "worker_id": client_id, "master_url": master_url}, indent=2), encoding="utf-8")
 
 
-OLLAMA_HOME = ROOT / "runtime" / "ollama"
-OLLAMA_MODELS = ROOT / "models" / "ollama"
-OLLAMA_RELEASE_API = "https://api.github.com/repos/ollama/ollama/releases/latest"
-OLLAMA_ASSET = "ollama-windows-amd64.zip"
+LLM_HOME = ROOT / "runtime" / "llamacpp"
+LLM_MODELS = ROOT / "models" / "llm"
+VISION_MODELS = ROOT / "models" / "vision"
+LLAMACPP_RELEASES_API = "https://api.github.com/repos/ggml-org/llama.cpp/releases?per_page=1"
 
 
-def configured_ollama_url() -> str:
-    match = re.search(r"(?ms)^ollama:\s*(.*?)(?=^[A-Za-z_]+:|\Z)", (ROOT / "config.yaml").read_text(encoding="utf-8"))
-    url = re.search(r'^\s*base_url:\s*["\']?([^"\'\s#]+)', match.group(1), re.MULTILINE) if match else None
-    return url.group(1).rstrip("/") if url else "http://127.0.0.1:11435"
+def configured_llm_url() -> str:
+    return llm_settings().get("base_url", "http://127.0.0.1:11435").rstrip("/")
+
+
+def vision_settings() -> dict[str, str]:
+    return flat_settings("vision")
+
+
+def configured_vision_url() -> str:
+    return vision_settings().get("base_url", "http://127.0.0.1:11436").rstrip("/")
 
 
 def _sha256(path: Path) -> str:
@@ -310,6 +500,24 @@ def _sha256(path: Path) -> str:
     with path.open("rb") as handle:
         for block in iter(lambda: handle.read(1 << 20), b""): digest.update(block)
     return digest.hexdigest()
+
+
+def replace_dir(source: Path, target: Path) -> None:
+    """Move a freshly extracted folder into place; on network drives or with a virus scanner holding it,
+    a plain rename fails with PermissionError, so retry and finally fall back to copy + delete."""
+    shutil.rmtree(target, ignore_errors=True)
+    for attempt in range(5):
+        try: source.replace(target); return
+        except PermissionError: time.sleep(2)
+    shutil.copytree(source, target, dirs_exist_ok=True); shutil.rmtree(source, ignore_errors=True)
+
+
+def transfer_stats(done: int, total: int, start_bytes: int, started: float) -> str:
+    """'12.3 MB/s, noch 4m 12s' from the bytes moved since this connection opened."""
+    speed = (done - start_bytes) / max(time.time() - started, 1e-6)
+    left = int((total - done) / speed) if speed > 0 else -1
+    eta = f", noch {left // 3600}h {left % 3600 // 60:02d}m {left % 60:02d}s" if left >= 3600 else f", noch {left // 60}m {left % 60:02d}s" if left >= 0 else ""
+    return f"{speed / 1e6:.1f} MB/s{eta}"
 
 
 def download_verified(url: str, target: Path, size: int, sha256: str | None, label: str, verify: bool = True) -> bool:
@@ -324,12 +532,13 @@ def download_verified(url: str, target: Path, size: int, sha256: str | None, lab
                 request = Request(url, headers={"Range": f"bytes={have}-"} if have else {})
                 with urlopen(request, timeout=60) as response:
                     if have and response.status != 206: part.unlink(); have = 0   # server ignored Range: restart
-                    last = -1
+                    last, shown, began, began_bytes = -1, 0.0, time.time(), have
                     with part.open("ab" if have else "wb") as out:
                         while chunk := response.read(1 << 20):
                             out.write(chunk); have += len(chunk)
-                            if have * 100 // size != last:
-                                last = have * 100 // size; print(f"[{label}] Download {last}% ({have >> 20}/{size >> 20} MB)", flush=True)
+                            if have * 100 // size != last and time.time() - shown >= 1.0:
+                                last, shown = have * 100 // size, time.time()
+                                print(f"[{label}] Download {last}% ({have >> 20}/{size >> 20} MB, {transfer_stats(have, size, began_bytes, began)})", flush=True)
         except OSError as error:
             print(f"[{label}] Download unterbrochen ({error}); Versuch {attempt}/3 setzt fort.", flush=True); time.sleep(3); continue
         if part.stat().st_size == size and (not verify or _sha256(part) == sha256):
@@ -338,84 +547,166 @@ def download_verified(url: str, target: Path, size: int, sha256: str | None, lab
     return False
 
 
-def ollama_executable() -> Path | None:
-    """The project-local Ollama; downloaded and verified into runtime/ollama when missing."""
-    exe = OLLAMA_HOME / ("ollama.exe" if os.name == "nt" else "ollama")
-    if exe.exists(): return exe
-    if os.name != "nt":
-        found = shutil.which("ollama")
-        return Path(found) if found else None
-    print("[Ollama] Lokale Installation fehlt; lade sie nach runtime/ollama ...", flush=True)
-    release = request_json(OLLAMA_RELEASE_API)
-    asset = next((a for a in (release or {}).get("assets", []) if a.get("name") == OLLAMA_ASSET), None)
-    if not asset or not str(asset.get("digest", "")).startswith("sha256:"):
-        print("[Ollama] Release-Informationen nicht abrufbar; spaeter erneut versuchen.", flush=True); return None
-    archive = ROOT / "runtime" / "downloads" / OLLAMA_ASSET
-    if not download_verified(asset["browser_download_url"], archive, int(asset["size"]), asset["digest"][7:], "Ollama"):
-        print("[Ollama] Download fehlgeschlagen; naechster Start setzt fort.", flush=True); return None
-    print("[Ollama] Entpacke ...", flush=True)
-    staging = OLLAMA_HOME.with_name("ollama.staging")
+def _has_nvidia() -> bool:
+    return shutil.which("nvidia-smi") is not None
+
+
+def llamacpp_executable() -> Path | None:
+    """The project-local llama-server; downloaded and verified into runtime/llamacpp when missing."""
+    name = "llama-server.exe" if os.name == "nt" else "llama-server"
+    found = next(LLM_HOME.rglob(name), None) if LLM_HOME.exists() else None
+    if found: return found
+    print("[LLM] Lokaler llama.cpp-Server fehlt; lade ihn nach runtime/llamacpp ...", flush=True)
+    releases = request_json(LLAMACPP_RELEASES_API)
+    release = releases[0] if isinstance(releases, list) and releases else (releases or {})
+    names = {a["name"]: a for a in release.get("assets", [])}
+    if os.name == "nt":
+        wanted = [n for n in names if n.endswith("-bin-win-cuda-12.4-x64.zip") or n.startswith("cudart-llama-bin-win-cuda-12.4-x64")] if _has_nvidia() \
+            else [n for n in names if n.endswith("-bin-win-cpu-x64.zip")]
+    else:
+        wanted = [n for n in names if n.endswith("-bin-ubuntu-x64.zip") or n.endswith("-bin-ubuntu-x64.tar.gz")]
+    if not wanted:
+        print("[LLM] Release-Informationen nicht abrufbar; spaeter erneut versuchen.", flush=True); return None
+    staging = LLM_HOME.with_name("llamacpp.staging")
     shutil.rmtree(staging, ignore_errors=True)
-    with zipfile.ZipFile(archive) as bundle:
-        if bundle.testzip() is not None: archive.unlink(); print("[Ollama] Archiv defekt; wird neu geladen.", flush=True); return None
-        bundle.extractall(staging)
-    shutil.rmtree(OLLAMA_HOME, ignore_errors=True); staging.replace(OLLAMA_HOME)
-    (OLLAMA_HOME / "VERSION").write_text(str(release.get("tag_name", "")), encoding="utf-8")
-    archive.unlink(missing_ok=True)
-    return exe if exe.exists() else None
-
-
-def _model_answers(base_url: str, model: str) -> bool:
-    """Smoke test: the model must load from disk and generate text."""
-    try:
-        request = Request(f"{base_url}/api/generate", data=json.dumps({"model": model, "prompt": "Sage: Hallo", "stream": False, "think": False, "options": {"num_predict": 8}}).encode(), headers={"Content-Type": "application/json"})
-        with urlopen(request, timeout=900) as response: return bool(json.loads(response.read()).get("response", "").strip())
-    except (OSError, json.JSONDecodeError): return False
-
-
-def _pull_model(base_url: str, model: str) -> bool:
-    request = Request(f"{base_url}/api/pull", data=json.dumps({"name": model, "stream": True}).encode(), headers={"Content-Type": "application/json"})
-    last = ""
-    try:
-        with urlopen(request, timeout=3600) as response:
-            for raw in response:
-                update = json.loads(raw)
-                if update.get("error"): print(f"[Modelle] Fehler: {update['error']}", flush=True); return False
-                total, completed = update.get("total"), update.get("completed")
-                line = f"{model}: {completed * 100 // total}%" if total and completed is not None else update.get("status", "")
-                if line and line != last: print(f"[Modelle] {line}", flush=True); last = line
-        return True
-    except (OSError, json.JSONDecodeError) as error:
-        print(f"[Modelle] Download unterbrochen: {error}", flush=True); return False
-
-
-def ensure_ollama_model() -> None:
-    """Run the project-local Ollama and make sure the configured model is complete and usable."""
-    model, base_url = configured_ollama_model(), configured_ollama_url()
-    if not model:
-        print("[Modelle] Kein Ollama-Modell konfiguriert; semantische Analyse bleibt deaktiviert.", flush=True); return
-    if request_json(f"{base_url}/api/tags") is None:
-        executable = ollama_executable()
-        if not executable:
-            print("[Modelle] Ollama ist nicht verfuegbar; Modell-Check uebersprungen.", flush=True); return
-        OLLAMA_MODELS.mkdir(parents=True, exist_ok=True)
-        SUPERVISOR.spawn("Ollama", [str(executable), "serve"], ROOT, {"OLLAMA_MODELS": str(OLLAMA_MODELS), "OLLAMA_HOST": base_url.split("//", 1)[-1]})
-        for _ in range(60):
-            time.sleep(.5)
-            if request_json(f"{base_url}/api/tags") is not None: break
+    for asset_name in wanted:
+        asset = names[asset_name]
+        archive = ROOT / "runtime" / "downloads" / asset_name
+        digest = str(asset.get("digest", ""))
+        if not download_verified(asset["browser_download_url"], archive, int(asset["size"]), digest[7:] if digest.startswith("sha256:") else None, "LLM", verify=digest.startswith("sha256:")):
+            print("[LLM] Download fehlgeschlagen; naechster Start setzt fort.", flush=True); return None
+        print(f"[LLM] Entpacke {asset_name} ...", flush=True)
+        if asset_name.endswith(".zip"):
+            with zipfile.ZipFile(archive) as bundle:
+                if bundle.testzip() is not None: archive.unlink(); print("[LLM] Archiv defekt; wird neu geladen.", flush=True); return None
+                bundle.extractall(staging)
         else:
-            print("[Modelle] Ollama-Dienst konnte nicht gestartet werden.", flush=True); return
-    for attempt in range(1, 4):
-        available = {item.get("name") for item in (request_json(f"{base_url}/api/tags") or {}).get("models", [])}
-        if model in available or f"{model}:latest" in available:
-            print(f"[Modelle] Pruefe {model} (Ladetest) ...", flush=True)
-            if _model_answers(base_url, model):
-                print(f"[Modelle] Ollama-Modell bereit: {model} (in {OLLAMA_MODELS})", flush=True); return
-            print(f"[Modelle] {model} antwortet nicht; Pull prueft und ergaenzt fehlende Teile.", flush=True)
-        else:
-            print(f"[Modelle] Lade {model} nach {OLLAMA_MODELS} (Versuch {attempt}/3) ...", flush=True)
-        _pull_model(base_url, model)   # Ollama resumes partial blobs and verifies every digest
-    print(f"[Modelle] {model} konnte nicht vollstaendig bereitgestellt werden; naechster Start versucht es erneut.", flush=True)
+            import tarfile
+            with tarfile.open(archive) as bundle: bundle.extractall(staging)
+        archive.unlink(missing_ok=True)
+    replace_dir(staging, LLM_HOME)
+    (LLM_HOME / "VERSION").write_text(str(release.get("tag_name", "")), encoding="utf-8")
+    found = next(LLM_HOME.rglob(name), None)
+    if found and os.name != "nt": found.chmod(0o755)
+    return found
+
+
+def llm_model_file() -> Path | None:
+    """The configured GGUF in models/llm, else the newest one there, else download the configured Hugging Face file."""
+    settings = llm_settings()
+    LLM_MODELS.mkdir(parents=True, exist_ok=True)
+    if settings.get("model_file"):
+        chosen = LLM_MODELS / settings["model_file"]
+        if chosen.exists(): return chosen
+        print(f"[LLM] {chosen} fehlt.", flush=True)
+    else:
+        ggufs = sorted(LLM_MODELS.glob("*.gguf"), key=lambda f: f.stat().st_mtime, reverse=True)
+        if ggufs: return ggufs[0]
+    repo, filename = settings.get("hf_repo"), settings.get("model_file") or settings.get("hf_file")
+    if not repo or not filename:
+        print("[LLM] Kein GGUF-Modell in models/llm und kein hf_repo/hf_file konfiguriert; LLM bleibt aus.", flush=True); return None
+    tree = request_json(f"https://huggingface.co/api/models/{repo}/tree/main") or []
+    entry = next((e for e in tree if isinstance(e, dict) and e.get("path") == filename), None)
+    if not entry or not entry.get("lfs"):
+        print(f"[LLM] {repo}/{filename} nicht abrufbar; spaeter erneut versuchen.", flush=True); return None
+    print(f"[LLM] Lade Modell {filename} nach models/llm ...", flush=True)
+    target = LLM_MODELS / filename
+    ok = download_verified(f"https://huggingface.co/{repo}/resolve/main/{filename}", target, int(entry["lfs"]["size"]), entry["lfs"]["oid"], "LLM")
+    return target if ok else None
+
+
+def ensure_llm_server() -> None:
+    """Run the project-local llama-server with a verified GGUF model (any GGUF in models/llm can be used)."""
+    base_url = configured_llm_url()
+    if request_json(f"{base_url}/health") is not None:
+        print("[LLM] laeuft bereits.", flush=True); return
+    model = llm_model_file()
+    if not model: return
+    executable = llamacpp_executable()
+    if not executable:
+        print("[LLM] llama-server ist nicht verfuegbar; LLM-Funktionen bleiben aus.", flush=True); return
+    settings = llm_settings()
+    host, _, port = base_url.split("//", 1)[-1].partition(":")
+    command = [str(executable), "-m", str(model), "--host", host, "--port", port or "11435", "-c", settings.get("ctx_size", "16384"),
+               "-ngl", settings.get("gpu_layers", "99"), "--jinja"]
+    print(f"[LLM] Starte llama-server mit {model.name} ...", flush=True)
+    SUPERVISOR.spawn("LLM", command, ROOT)
+    for _ in range(600):
+        time.sleep(.5)
+        if request_json(f"{base_url}/health") is not None:
+            print(f"[LLM] Modell bereit: {model.name} (in {LLM_MODELS})", flush=True); return
+    print("[LLM] Modell wurde nicht rechtzeitig geladen; Log oben pruefen.", flush=True)
+
+
+def vision_model_files() -> tuple[Path, Path] | None:
+    """Fetch the VLM and projector with resumable, hash-checked downloads."""
+    settings = vision_settings()
+    if settings.get("enabled", "true").lower() in {"false", "0", "no"}:
+        print("[Vision] In config.yaml deaktiviert.", flush=True); return None
+    repo = settings.get("hf_repo")
+    model_name = settings.get("model_file") or settings.get("hf_model_file")
+    projector_name = settings.get("mmproj_file") or settings.get("hf_mmproj_file")
+    if not repo or not model_name or not projector_name:
+        print("[Vision] hf_repo, model_file oder mmproj_file fehlt in config.yaml.", flush=True); return None
+    VISION_MODELS.mkdir(parents=True, exist_ok=True)
+    # The NAS pool can briefly overlap old and new start.py processes during a
+    # restart.  One downloader must own a .part file; Range requests from two
+    # processes would otherwise corrupt it despite download_verified().
+    lock = VISION_MODELS / ".download.lock"
+    try:
+        descriptor = os.open(lock, os.O_WRONLY | os.O_CREAT | os.O_EXCL)
+    except FileExistsError:
+        try:
+            age = time.time() - lock.stat().st_mtime
+            if age > 3600:
+                lock.unlink(missing_ok=True)
+                return vision_model_files()
+        except OSError:
+            pass
+        print("[Vision] Download wird bereits von einem anderen SeriesAI-Prozess ausgefuehrt.", flush=True)
+        return None
+    os.write(descriptor, f"pid={os.getpid()} started={time.time()}\n".encode())
+    os.close(descriptor)
+    tree = request_json(f"https://huggingface.co/api/models/{repo}/tree/main") or []
+    files: list[Path] = []
+    try:
+        for name, kind in ((model_name, "Vision-Modell"), (projector_name, "Vision-Projektor")):
+            target = VISION_MODELS / name
+            entry = next((e for e in tree if isinstance(e, dict) and e.get("path") == name), None)
+            if not entry or not entry.get("lfs"):
+                print(f"[Vision] {repo}/{name} nicht abrufbar; spaeter erneut versuchen.", flush=True); return None
+            if not target.exists() or target.stat().st_size != int(entry["lfs"]["size"]):
+                print(f"[Vision] Lade {kind} {name} nach models/vision ...", flush=True)
+                if not download_verified(f"https://huggingface.co/{repo}/resolve/main/{name}", target, int(entry["lfs"]["size"]), entry["lfs"]["oid"], "Vision"):
+                    return None
+            files.append(target)
+        return files[0], files[1]
+    finally:
+        lock.unlink(missing_ok=True)
+
+
+def ensure_vision_server() -> None:
+    """Start an isolated local VLM server without taking over the text-LLM port."""
+    base_url = configured_vision_url()
+    if request_json(f"{base_url}/health") is not None:
+        print("[Vision] laeuft bereits.", flush=True); return
+    files = vision_model_files()
+    if not files: return
+    model, projector = files
+    executable = llamacpp_executable()
+    if not executable:
+        print("[Vision] llama-server ist nicht verfuegbar; Vision bleibt aus.", flush=True); return
+    settings = vision_settings()
+    host, _, port = base_url.split("//", 1)[-1].partition(":")
+    command = [str(executable), "-m", str(model), "--mmproj", str(projector), "--host", host, "--port", port or "11436",
+               "-c", settings.get("ctx_size", "4096"), "-ngl", settings.get("gpu_layers", "0"), "--jinja"]
+    print(f"[Vision] Starte llama-server mit {model.name} und {projector.name} ...", flush=True)
+    SUPERVISOR.spawn("Vision", command, ROOT)
+    for _ in range(600):
+        time.sleep(.5)
+        if request_json(f"{base_url}/health") is not None:
+            print(f"[Vision] Modell bereit: {model.name} (in {VISION_MODELS})", flush=True); return
+    print("[Vision] Modell wurde nicht rechtzeitig geladen; Log oben pruefen.", flush=True)
 
 
 TORCH_INDEX = "https://download.pytorch.org/whl/cu124"
@@ -451,6 +742,15 @@ def ensure_python_packages() -> None:
             if process.wait() == 0 and _modules_available(modules): break
         else:
             print(f"[Pip] {label} konnte nicht installiert werden; naechster Start versucht es erneut.", flush=True)
+
+
+def ensure_dashboard_packages() -> None:
+    """Install only the coordinator's small dependency set before dashboard start."""
+    if _modules_available(["pydantic", "yaml"]):
+        return
+    print("[Vorbereitung] Installiere Dashboard-Grundlagen (pydantic, PyYAML) ...", flush=True)
+    if not _pip_install(venv_python(), "pydantic>=2.7,<3", "PyYAML>=6.0,<7"):
+        raise RuntimeError("Dashboard-Grundlagen konnten nicht installiert werden.")
 
 
 def ensure_model_files() -> None:
@@ -508,47 +808,13 @@ def ensure_face_recognizer_model() -> None:
         print("[Modelle] Gesichtswiedererkennung (SFace): Download fehlgeschlagen; naechster Start setzt fort.", flush=True)
 
 
-def _discover_once(port: int, timeout: float) -> str | None:
-    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1); sock.settimeout(timeout)
-        try:
-            sock.sendto(b"SERIESAI_DISCOVER_V1", ("255.255.255.255", DISCOVERY_PORT))
-            while True:
-                response = json.loads(sock.recvfrom(2048)[0])
-                if response.get("service") == "seriesai" and response.get("port") == port: return response["url"]
-        except (OSError, TimeoutError, json.JSONDecodeError):
-            return None
-
-
-def discover_coordinator(port: int, attempts: int = 3, timeout: float = 1.5) -> str | None:
-    # A single short broadcast window is exactly the race where two machines starting at the
-    # same moment can both find nobody home and both decide to become their own coordinator.
-    # A few retries shrink that window a lot without needing real distributed consensus.
-    for attempt in range(attempts):
-        found = _discover_once(port, timeout)
-        if found: return found
-        if attempt < attempts - 1: time.sleep(0.3)
-    return None
-
-
-def configured_role() -> str:
-    """Top-level `role: auto|worker-only` in config.yaml. 'worker-only' means this machine
-    must never self-elect as coordinator, no matter the discovery timing - the reliable way
-    to guarantee "client 2 and beyond are always workers" regardless of startup order."""
-    config_path = ROOT / "config.yaml"
-    if not config_path.is_file(): return "auto"
-    match = re.search(r'^\s*role:\s*["\']?([a-z-]+)["\']?\s*(?:#.*)?$', config_path.read_text(encoding="utf-8"), re.MULTILINE)
-    role = match.group(1) if match else "auto"
-    return role if role in {"auto", "worker-only"} else "auto"
-
-
 def human_duration(seconds: int | None) -> str:
     if seconds is None: return "wird berechnet"
     hours, remainder = divmod(max(0, seconds), 3600)
     return f"{hours} h {remainder // 60:02d} min"
 
 
-def monitor(url: str, interval: float, client_id: str, mode: str) -> None:
+def monitor(url: str, interval: float, client_id: str, mode: str, recover_server=None) -> None:
     links = f"Dashboard: {url}/" + (f"  |  ComfyUI: {COMFYUI_URL}/" if configured_video_backend() == "comfyui" else "")
     print(f"\n{links}")
     print(f"Dieser Rechner: {mode}")
@@ -561,6 +827,11 @@ def monitor(url: str, interval: float, client_id: str, mode: str) -> None:
             status = request_json(f"{url}/status"); stamp = time.strftime("%H:%M:%S")
             if not status:
                 print(f"[{stamp}] Warte auf den Koordinator ...", flush=True)
+                # A long model download can outlive an already running
+                # coordinator. Recover it here instead of leaving the public
+                # dashboard at 502 while the Vision server is healthy.
+                if recover_server:
+                    recover_server()
             else:
                 pipeline = status.get("pipeline", {}); active = pipeline.get("active", [])
                 generation = status.get("restart_generation", 0)
@@ -584,55 +855,70 @@ def monitor(url: str, interval: float, client_id: str, mode: str) -> None:
         print("Alles beendet. Unterbrochene Renderjobs setzt `recover-queue` fort.")
 
 
+def safe_step(label: str, step) -> None:
+    """Run one setup step; a failure is reported but must never stop the remaining services (e.g. ComfyUI)."""
+    try: step()
+    except Exception as error:
+        print(f"[{label}] Fehler: {type(error).__name__}: {error} - weiter mit den uebrigen Diensten.", flush=True)
+
+
 def main() -> None:
     global COMFYUI_WATCHDOG
     if hasattr(sys.stdout, "reconfigure"): sys.stdout.reconfigure(line_buffering=True, errors="replace")
-    parser = argparse.ArgumentParser(description="Start or join SeriesAI and keep the live monitor visible.")
-    parser.add_argument("--host", default="0.0.0.0")
+    parser = argparse.ArgumentParser(description="Start SeriesAI (local dashboard, LLM, ComfyUI, render worker) and keep the live monitor visible.")
+    # The shared All-for-One launcher invokes every project as
+    # ``start.py serve --yes``.  Accept that established contract while
+    # retaining the direct ``python start.py`` invocation documented here.
+    parser.add_argument("command", nargs="?", choices=["serve"], help=argparse.SUPPRESS)
+    parser.add_argument("--yes", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--host", default="127.0.0.1", help="Nur lokal erreichbar (Standard); ein anderer Wert macht das Dashboard im Netzwerk sichtbar.")
     parser.add_argument("--port", default=PORT, type=int)
-    parser.add_argument("--join", metavar="URL")
     parser.add_argument("--refresh-seconds", type=float, default=5.0)
     parser.add_argument("--no-install", action="store_true", help="Skip the Python package and model download/verification step.")
+    parser.add_argument("--no-llm", action="store_true", help="Do not start llama.cpp (useful for dashboard-only diagnostics).")
     parser.add_argument("--no-render-worker", action="store_true", help="Do not start the optional configured local render worker.")
     args = parser.parse_args()
+    if not acquire_instance_lock(): return
+    # os.execv() keeps the PID (and therefore the lock) during a controlled
+    # restart; normal exits and Ctrl+C release it for the next start.
+    atexit.register(release_instance_lock)
     print("\n=== SeriesAI: lokaler Master & Live-Monitor ===\nProjekt: " + str(ROOT), flush=True)
     bootstrap()
-    if not args.no_install:
-        ensure_python_packages(); ensure_model_files()
-    ensure_ollama_model()
+    safe_step("Dashboard", ensure_dashboard_packages)
     local_url = f"http://127.0.0.1:{args.port}"; status = request_json(f"{local_url}/status")
-    monitor_url = local_url; client_id = "master"; mode = "Master & Koordinator"
-    role = configured_role()
-    if not status:
-        join_url = args.join or discover_coordinator(args.port)
-        if not join_url and role == "worker-only":
-            print("config.yaml: role=worker-only - dieser Client wird nie selbst Koordinator, warte auf einen Master im Netzwerk ...", flush=True)
-            while not join_url:
-                time.sleep(2.0); join_url = discover_coordinator(args.port)
-        if join_url:
-            name = os.environ.get("COMPUTERNAME") or socket.gethostname()
-            client_id = f"{name.lower()}::{sys.platform.lower()}"
-            result = request_json(f"{join_url.rstrip('/')}/workers/register", {"name": name, "platform": sys.platform, "client_id": client_id, "work_intensity": configured_work_intensity()})
-            if not result: raise SystemExit(f"Koordinator konnte diesen Worker nicht aufnehmen: {join_url}")
-            print(f"Mit Master verbunden: {join_url} (Worker {result['worker_id']}).", flush=True); monitor_url = join_url.rstrip("/"); mode = f"Worker von {monitor_url}"
-        else:
-            # The coordinator runs as a child of this terminal (output prefixed
-            # [Koordinator]) with the project venv, so its optional local modules
-            # (YAML, Pydantic, future backends) are available after a restart.
-            SUPERVISOR.spawn("Koordinator", [str(venv_python()), "-m", "seriesai.coordinator", "--host", args.host, "--port", str(args.port)], ROOT)
-            for _ in range(20):
-                time.sleep(.25); status = request_json(f"{local_url}/status")
-                if status: break
-            if not status: raise SystemExit("Koordinator konnte nicht gestartet werden; siehe logs/coordinator.error.log")
-            print(f"SeriesAI gestartet (PID {status['pid']}).", flush=True)
-    else:
-        print(f"SeriesAI laeuft bereits (PID {status['pid']}, Worker {status['workers']}).", flush=True)
+    monitor_url = local_url; client_id = "master"; mode = "SeriesAI"
+
+    def start_server() -> None:
+        """The local dashboard/queue server runs as a child of this terminal (output prefixed [Server]) with the
+        project venv. The All-for-One hub is the coordinator for everything that spans PCs, so there is no
+        LAN discovery, joining or role election here any more."""
+        nonlocal status
+        status = request_json(f"{local_url}/status")
+        if status:
+            print(f"SeriesAI laeuft bereits (PID {status['pid']}).", flush=True); return
+        SUPERVISOR.spawn("Server", [str(venv_python()), "-m", "seriesai.coordinator", "--host", args.host, "--port", str(args.port)], ROOT)
+        for _ in range(240):   # a cold start from a network drive imports slowly
+            time.sleep(.5); status = request_json(f"{local_url}/status")
+            if status: break
+        if not status: raise SystemExit("Der lokale Server konnte nicht gestartet werden; siehe logs/errors.log")
+        print(f"SeriesAI gestartet (PID {status['pid']}) - Dashboard: {local_url}/", flush=True)
+
+    # The hub checks that the dashboard answers, so bring it up first (minutes before the LLM has loaded) whenever
+    # the venv already has what it needs; on a fresh machine install the packages first.
+    server_early = _modules_available(["pydantic", "yaml"])
+    if server_early: safe_step("Server", start_server)
+    if not args.no_install:
+        safe_step("Pip", ensure_python_packages); safe_step("Modelle", ensure_model_files)
+    if not server_early: start_server()
+    if not args.no_llm:
+        safe_step("LLM", ensure_llm_server)
+        safe_step("Vision", ensure_vision_server)
     if not args.no_render_worker:
-        if not args.no_install: ensure_comfyui_install()
-        ensure_comfyui()
+        if not args.no_install: safe_step("ComfyUI", ensure_comfyui_install)
+        safe_step("ComfyUI", ensure_comfyui)
         COMFYUI_WATCHDOG = True
         ensure_local_render_worker(monitor_url, client_id)
-    monitor(monitor_url, max(1.0, args.refresh_seconds), client_id, mode)
+    monitor(monitor_url, max(1.0, args.refresh_seconds), client_id, mode, start_server)
 
 
 if __name__ == "__main__": main()

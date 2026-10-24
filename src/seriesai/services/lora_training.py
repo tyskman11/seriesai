@@ -1,7 +1,7 @@
 """Train a per-character LoRA (image or video) for the local LTX-2.3 model.
 
 Uses ai-toolkit (ostris/ai-toolkit, https://github.com/ostris/ai-toolkit), vendored on
-first use like ComfyUI/Ollama but into its own git clone + its own Python venv (its
+first use like ComfyUI/llama.cpp but into its own git clone + its own Python venv (its
 dependency set is heavy and would otherwise fight the project's own torch/TTS install).
 
 HONEST CAVEAT (see this session's plan): ai-toolkit's LTX-2 support loads the model via

@@ -5,7 +5,7 @@ No backend receives an API key or uses a cloud endpoint. Selection lives in `con
 | Contract | Current local adapter | Replaceable alternatives |
 | --- | --- | --- |
 | `TranscriptionBackend` | WhisperX | faster-whisper, local diarization stack |
-| `LLMBackend` | Ollama at `127.0.0.1:11435` | another local OpenAI-compatible runtime, llama.cpp |
+| `LLMBackend` | llama.cpp `llama-server` at `127.0.0.1:11435` (any GGUF in `models/llm`) | another local OpenAI-compatible runtime |
 | `VisionBackend` | configurable local VLM | Qwen-VL/Qwen3-VL, other local VLMs |
 | `VoiceBackend` | configurable local TTS | XTTS, Chatterbox |
 | `VideoBackend` | configurable local ComfyUI workflow | LTX, Wan, FramePack |
@@ -13,7 +13,7 @@ No backend receives an API key or uses a cloud endpoint. Selection lives in `con
 
 The RTX 3060 Laptop has 6 GB VRAM, so backends must offer CPU/RAM offload, low-VRAM profiles, sequential processing, and explicit cleanup. Quality is favored over speed; no architecture assumes an entire episode fits in VRAM.
 
-Ollama is configured locally on this PC (`qwen3.5:9b` at `127.0.0.1:11435`) for German structured analysis, planning and reviewable continuity candidates. It has no API key and no cloud dependency. Video, vision and TTS adapters remain intentionally unconfigured until a locally installed model and workflow are selected; SeriesAI will not silently replace them with a cloud service.
+A GGUF model runs locally on this PC via llama.cpp (`models/llm`, `127.0.0.1:11435`) for German structured analysis, planning and reviewable continuity candidates. It has no API key and no cloud dependency. Video, vision and TTS adapters remain intentionally unconfigured until a locally installed model and workflow are selected; SeriesAI will not silently replace them with a cloud service.
 
 ## ComfyUI video worker
 

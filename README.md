@@ -2,6 +2,8 @@
 
 SeriesAI is a **local-first, resumable** system for building a persistent “Series Brain” from existing TV episodes and using it to plan, generate, render, review, and commit new episodes. It never requires OpenAI, Claude, cloud services, API keys, or token-based services.
 
+Current version: **0.1.3**. User-visible changes are recorded in [CHANGELOG.md](CHANGELOG.md).
+
 ## Portability
 
 The project uses paths relative to its own root. `config.yaml` resolves `.` as the project directory, `Series` as the data directory, and ComfyUI as the portable folder `..\00 - DO NOT LIST\ComfyUI_windows_portable`. SQLite stores source, cache, artifact, and transcript paths relative to the project root. Move the entire `SeriesAI` folder together with the `00 - DO NOT LIST` folder without editing global drive paths.
@@ -29,14 +31,18 @@ Status: the local analysis, review, planning, continuity, shot-queue, assembly, 
 
 ## Installation and start
 
-Requires Python 3.10+ and Git. FFmpeg was detected on this PC. The launcher installs Python dependencies; Ollama remains strictly local. Vision, TTS, and video models are intentionally interchangeable local backends rather than bundled downloads.
+Requires Python 3.10+ and Git. FFmpeg was detected on this PC. The launcher installs Python dependencies; the LLM (llama.cpp) remains strictly local. Vision, TTS, and video models are intentionally interchangeable local backends rather than bundled downloads.
 
 ```text
 cd <PROJECT_ROOT>
 python start.py
 ```
 
-`start.py` is the only start script. Double-click it on Windows: it opens exactly one terminal and runs **all services in it** — Ollama, ComfyUI, the Coordinator and the local render worker — with every output line prefixed (`[ComfyUI]`, `[Ollama]`, `[Koordinator]`, `[Worker]`) next to the live monitor. Services that already answer (for example a running ComfyUI) are not started twice. `Strg+C` stops the monitor and every service started by it. In a terminal use `python start.py`. It creates a local virtual environment and installs required dependencies. It uses no administrator rights or `sudo`; on Linux/Ubuntu pip calls include `--break-system-packages`. Use `python -m seriesai.cli doctor` to inspect the local machine without making changes.
+`python start.py` is the only start script. It starts llama.cpp, ComfyUI, the local dashboard/queue server and the local render worker in one terminal, with every output line prefixed (`[LLM]`, `[ComfyUI]`, `[Server]`, `[Worker]`) next to the live monitor. Services that already answer (for example a running ComfyUI) are not started twice. `Strg+C` stops the monitor and every service started by it.
+
+The All-for-One hub (the web site two folders above this project) is the coordinator for everything that spans PCs; SeriesAI itself has no coordinator mode, LAN discovery or role election. The hub's agent starts and stops this project by running `start.py` and checks that the dashboard answers on port 8770.
+
+`start.py` creates a local virtual environment and installs required dependencies. It uses no administrator rights or `sudo`; on Linux/Ubuntu pip calls include `--break-system-packages`. Use `python -m seriesai.cli doctor` to inspect the local machine without making changes.
 
 ## ComfyUI integration
 
@@ -59,12 +65,13 @@ set `models.video_backend: comfyui` and `comfyui_api.workflow_template` in
 that PC's portable config.
 
 ```text
-python -m seriesai.worker --master http://MASTER-IP:8765 --worker-id render-pc-01
+python -m seriesai.worker --master http://MASTER-IP:8770 --worker-id render-pc-01
 ```
 
 Each worker claims one pending shot atomically, uses only `127.0.0.1:8188` for
 its own ComfyUI API, streams its completed output to the master and marks only
-that shot completed. A crash leaves a `rendering` item recoverable through
+that shot completed. During rendering and upload, the worker sends a heartbeat
+to the master, so long-running ComfyUI jobs are not reclaimed as stale. A crash leaves a `rendering` item recoverable through
 `recover-queue`; a model or ComfyUI error becomes a retry for that one shot.
 
 Verify the configured local Wan workflow without touching the Series Brain:
@@ -114,7 +121,7 @@ Each Python CLI stage is resumable and skips completed records. A consolidated P
 ## Series Brain: completed baseline and safe character proposals
 
 After German transcripts are available, create resumable event summaries with
-the configured local Ollama model:
+the configured local LLM:
 
 ```text
 python -m seriesai.cli analyze-series-semantics --series-id game_shakers
@@ -186,7 +193,7 @@ stored Series-Brain events:
 python -m seriesai.cli propose-character-profiles --series-id game_shakers
 ```
 
-The command uses the configured local Ollama model and records a checkpoint in
+The command uses the configured local LLM and records a checkpoint in
 `generation_jobs`. Its output lives only in `character_profile_proposals`:
 it does **not** change canonical personality, goals, memories, relationships,
 or continuity. The dashboard lists the summary, traits, goals, confidence,
@@ -280,7 +287,7 @@ producing a silently incomplete episode.
 ## Review-first episode planning
 
 After approving at least one canonical character, create a local outline with
-the configured Ollama model:
+the configured local LLM:
 
 ```text
 python -m seriesai.cli plan-episode --series-id game_shakers --idea "Eine Figur entwickelt einen experimentellen AI-Controller." --duration-minutes 22
@@ -316,7 +323,7 @@ Folder prefixes set processing order and are removed from the generated stable s
 
 ## Multiple PCs
 
-On a trusted LAN, simply run `python start.py` on every PC. The first PC starts the Coordinator; later PCs discover it with local UDP broadcast and automatically join as workers. `--join http://PRIMARY_PC_IP:8765` remains available as a direct fallback. Worker registration is implemented now; distributed job claiming/execution is the next queue phase, so the current CPU-intensive transcription loop remains local to its starter PC.
+Cross-PC work is coordinated by the All-for-One hub, not by SeriesAI. A second PC that should only render can still run `python -m seriesai.worker --master http://MASTER-IP:8770` against this PC's dashboard/queue server.
 
 ## Backup and restore
 
@@ -330,7 +337,7 @@ Restore the complete set while SeriesAI is stopped. The database is intentionall
 
 ## Troubleshooting
 
-- `ollama` is currently not installed. This does not block Phase 1 or database work; Phase 4 will use a local Ollama endpoint only when installed.
+- The local LLM (llama.cpp) is downloaded by `start.py` on first start; without it only the LLM-based phases are unavailable.
 - With 6 GB VRAM, keep `prefer_cpu_offload: true`. Backends will expose VRAM/offload options instead of assuming a large GPU.
 - If a job crashes later, its `generation_jobs` record, checkpoint JSON, attempts, and individual `rendered_shots` statuses will determine precisely what is resumed.
 
@@ -340,9 +347,9 @@ The coordinator always runs with the project's `.venv` Python. This keeps the
 single visible `start.py` monitor while ensuring dashboard restarts retain all
 local project dependencies.
 
-## Local Ollama and models
+## Local LLM (llama.cpp) and models
 
-`start.py` keeps Ollama entirely inside the project: the Windows build is downloaded once into `runtime\ollama` (size and SHA-256 are checked against the GitHub release; an interrupted download resumes from its `.part` file), and it runs on its own port `11435` so it never collides with a system-wide Ollama. Models are stored in `models\ollama` (`OLLAMA_MODELS`). The configured model (`qwen3.5:9b`) is verified on every start with a load-and-generate test; if it is missing or incomplete, `ollama pull` resumes and re-verifies every blob, up to three attempts.
+`start.py` keeps the LLM entirely inside the project, with nothing to install: the llama.cpp server build (`llama-server`, CUDA build when an NVIDIA GPU is found, otherwise CPU) is downloaded once into `runtime\llamacpp` (size and SHA-256 are checked against the GitHub release; an interrupted download resumes from its `.part` file). It runs on its own port `11435`. Models are plain **GGUF files in `models\llm`**: drop any GGUF there and it is used (`llm.model_file: null` = newest file; set a file name to pin one). If the folder is empty, the configured `llm.hf_repo`/`llm.hf_file` (default Qwen3-8B Q4_K_M) is downloaded with size and SHA-256 verification. Switch model = copy a GGUF into `models\llm` and restart. `llm.ctx_size` and `llm.gpu_layers` tune memory use.
 
 ## Original voices and cloned dialogue (XTTS-v2)
 

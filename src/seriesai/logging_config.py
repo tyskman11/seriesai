@@ -3,9 +3,12 @@ from __future__ import annotations
 import logging
 import sys
 import threading
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
-_FILE_FORMAT = "%(asctime)s %(levelname)s %(name)s %(message)s"
+_FILE_FORMAT = "%(asctime)s %(levelname)s pid=%(process)d thread=%(threadName)s %(name)s %(message)s"
+_MAX_LOG_BYTES = 10 * 1024 * 1024
+_BACKUP_COUNT = 5
 
 
 def configure_logging(log_directory: Path | str, console: bool = True) -> logging.Logger:
@@ -25,7 +28,12 @@ def configure_logging(log_directory: Path | str, console: bool = True) -> loggin
     root.handlers.clear()
     file_formatter = logging.Formatter(_FILE_FORMAT)
     for name, level in (("app.log", logging.INFO), ("errors.log", logging.ERROR)):
-        handler = logging.FileHandler(directory / name, encoding="utf-8")
+        handler = RotatingFileHandler(
+            directory / name,
+            maxBytes=_MAX_LOG_BYTES,
+            backupCount=_BACKUP_COUNT,
+            encoding="utf-8",
+        )
         handler.setFormatter(file_formatter); handler.setLevel(level)
         root.addHandler(handler)
     if console:

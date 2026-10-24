@@ -36,7 +36,7 @@ class TranscriptionService:
         self._stage(episode_id, "running", json.dumps({"audio": audio["file_path"]}))
         backend = FasterWhisperBackend(self.config.transcription.model, self.config.paths.project_root / "models" / "whisper", self.config.transcription.device, self.config.transcription.compute_type, self.config.transcription.beam_size)
         try:
-            result = backend.transcribe(str(audio_path), language=self.config.localization.analysis_language)
+            result = self._pool_result(episode_id) or backend.transcribe(str(audio_path), language=self.config.localization.analysis_language)
             json_path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
             text_path.write_text("\n".join(item["text"] for item in result["segments"]), encoding="utf-8")
             transcript_id = str(uuid.uuid4())
@@ -61,6 +61,19 @@ class TranscriptionService:
             results.append(result)
             if progress: progress(index, episode_id, result.status)
         return results
+
+    def _pool_result(self, episode_id: str) -> dict | None:
+        """Transkript aus dem Power Pool (pool/results/<quelldatei>.transcript.json), falls Teilnehmer es berechnet haben."""
+        with self.database.connect() as connection:
+            row = connection.execute("SELECT source_path FROM episodes WHERE episode_id = ?", (episode_id,)).fetchone()
+        if not row or not row[0]:
+            return None
+        pooled = self.config.paths.project_root / "pool" / "results" / f"{Path(row[0]).stem}.transcript.json"
+        if not pooled.is_file():
+            return None
+        data = json.loads(pooled.read_text(encoding="utf-8"))
+        return {"language": self.config.localization.analysis_language, "language_probability": 1.0,
+                "segments": [{"start": g["start"], "end": g["end"], "text": g["text"].strip(), "avg_logprob": 0.0, "no_speech_prob": 0.0} for g in data["segments"] if g["text"].strip()]}
 
     def _existing(self, episode_id: str):
         with self.database.connect() as connection:

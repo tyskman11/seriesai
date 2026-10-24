@@ -128,6 +128,15 @@ def load_config(path: Path | str) -> AppConfig:
     with config_path.open("r", encoding="utf-8") as handle:
         raw: dict[str, Any] = yaml.safe_load(handle) or {}
     config = AppConfig.model_validate(raw)
+    configured_backend = config.models.transcription_backend
+    if configured_backend and configured_backend != config.transcription.backend:
+        raise ValueError(
+            "models.transcription_backend and transcription.backend must name the same backend "
+            f"(got {configured_backend!r} and {config.transcription.backend!r})."
+        )
+    # Keep the legacy selector and the operational transcription section in sync
+    # for callers which still inspect models.transcription_backend.
+    config.models.transcription_backend = config.transcription.backend
     base = config_path.resolve().parent
     config.paths.project_root = _resolve_path(base, config.paths.project_root)
     config.paths.series_root = _resolve_path(config.paths.project_root, config.paths.series_root)

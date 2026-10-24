@@ -1,10 +1,13 @@
 .venv/
+.venv-windows/
 __pycache__/
 *.py[cod]
 *.egg-info/
 .pytest_cache/
 Series/series.db
 Series/series.db-*
+series.db
+series.db-*
 Series/Generated/
 Series/Input/
 Series/voices/
@@ -26,3 +29,5 @@ models/
 runtime/
 .env
 *.tmp
+
+pool/

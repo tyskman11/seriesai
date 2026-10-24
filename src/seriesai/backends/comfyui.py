@@ -8,6 +8,7 @@ import uuid
 from collections.abc import Callable
 from pathlib import Path
 import socket
+import subprocess
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -40,6 +41,53 @@ class ComfyUIWorkflowBackend(VideoBackend):
         if not self.base_url.startswith("http://127.0.0.1") and not self.base_url.startswith("http://localhost"):
             raise ValueError("ComfyUI API must be a local loopback address on the rendering worker")
 
+    def is_running(self) -> bool:
+        try:
+            self._get("/system_stats"); return True
+        except RuntimeError:
+            return False
+
+    @staticmethod
+    def launch_args(intensity: str, gpu_vram_gb: int) -> list[str]:
+        """Same VRAM policy as start.py: small GPUs always stay on --lowvram."""
+        base = ["--windows-standalone-build", "--disable-auto-launch", "--enable-manager"]
+        if gpu_vram_gb <= 12 and intensity == "full": return base + ["--lowvram", "--reserve-vram", "0.5"]
+        if intensity == "eco": return base + ["--lowvram", "--reserve-vram", "2"]
+        if intensity == "full": return base + ["--normalvram", "--reserve-vram", "0.5"]
+        return base + ["--lowvram", "--reserve-vram", "1"]
+
+    def _launch_in_progress(self) -> bool:
+        """True while some ComfyUI main.py process exists (e.g. started by start.py and still booting)."""
+        try:
+            out = subprocess.run(["powershell", "-NoProfile", "-Command",
+                                  "(@(Get-CimInstance Win32_Process | Where-Object { $_.Name -like 'python*' -and $_.CommandLine -like '*ComfyUI*main.py*' })).Count"],
+                                 capture_output=True, text=True, timeout=30).stdout.strip()
+            return out.isdigit() and int(out) > 0
+        except (OSError, subprocess.SubprocessError):
+            return False
+
+    def ensure_running(self, intensity: str = "full", gpu_vram_gb: int = 6, log=None, timeout: float = 3600.0) -> None:
+        """Start the portable ComfyUI (``<paths.comfyui>/..``) if its API does not answer, then wait for it."""
+        say = log or (lambda message: None)
+        if self.is_running(): return
+        portable = Path(self.comfyui_root).resolve().parent
+        python = portable / "python_embeded" / "python.exe"
+        if not python.exists():
+            raise RuntimeError(f"ComfyUI nicht startbar: {python} fehlt (python start.py installiert es)")
+        if self._launch_in_progress():
+            say("ComfyUI startet bereits, warte auf die API ...")
+        else:
+            say(f"ComfyUI nicht erreichbar - starte {portable.name} ...")
+            logfile = (Path(self.project_root) / "logs" / "comfyui.log").open("ab")
+            flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+            subprocess.Popen([str(python), "-s", "ComfyUI/main.py", *self.launch_args(intensity, gpu_vram_gb)],
+                             cwd=portable, stdout=logfile, stderr=subprocess.STDOUT, creationflags=flags)
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if self.is_running(): say("ComfyUI bereit."); return
+            time.sleep(3)
+        raise RuntimeError(f"ComfyUI antwortet nach {int(timeout)} s nicht (siehe logs/comfyui.log)")
+
     def render_shot(self, specification: dict, on_submitted: Callable[[str], None] | None = None) -> str:
         template_path = self.config.workflow_template
         reference_image = specification.get("reference_image")
@@ -64,6 +112,7 @@ class ComfyUIWorkflowBackend(VideoBackend):
 
     def wait_for_prompt(self, prompt_id: str, specification: dict) -> str:
         deadline = time.monotonic() + self.config.timeout_seconds
+        missing = 0
         while time.monotonic() < deadline:
             try:
                 history = self._get(f"/history/{prompt_id}")
@@ -84,6 +133,13 @@ class ComfyUIWorkflowBackend(VideoBackend):
                 asset = self._first_video(outputs)
                 if asset:
                     return self._copy_output(asset, specification)
+            elif self._prompt_gone(prompt_id):
+                # Not finished, not running, not pending: ComfyUI restarted or dropped it. Waiting out the full
+                # timeout would just stall the queue for hours; fail now so the shot is retried.
+                missing += 1
+                if missing >= 3: raise RuntimeError(f"ComfyUI kennt den Auftrag {prompt_id} nicht mehr (Neustart?) - Shot wird neu eingereicht")
+            else:
+                missing = 0
             time.sleep(self.config.poll_seconds)
         raise TimeoutError(f"ComfyUI did not complete shot within {self.config.timeout_seconds}s")
 
@@ -91,6 +147,13 @@ class ComfyUIWorkflowBackend(VideoBackend):
     # (UnetLoaderGGUF) into node "11" (CFGGuider)'s "model" input. A trained character LoRA
     # is spliced in between those two, without needing a separate LoRA-variant template file.
     _CFGGUIDER_NODE, _BASE_MODEL_NODE = "11", "1"
+
+    def _prompt_gone(self, prompt_id: str) -> bool:
+        try:
+            queue = self._get("/queue")
+        except RuntimeError:
+            return False   # API hiccup: not proof the prompt is lost
+        return not any(len(item) > 1 and item[1] == prompt_id for key in ("queue_running", "queue_pending") for item in queue.get(key, []))
 
     def _inject_lora(self, workflow: dict, lora_name: str) -> dict:
         guider = workflow.get(self._CFGGUIDER_NODE)

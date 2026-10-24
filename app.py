@@ -74,6 +74,11 @@ def remote_size(url: str) -> int | None:
         return None
 
 
+def fmt_duration(seconds: float) -> str:
+    seconds = int(seconds); h, rest = divmod(seconds, 3600); m, s = divmod(rest, 60)
+    return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
+
+
 def download(url: str, dest: Path, expected_size: int | None) -> bool:
     dest.parent.mkdir(parents=True, exist_ok=True)
     tmp = dest.with_suffix(dest.suffix + ".part")
@@ -97,7 +102,7 @@ def download(url: str, dest: Path, expected_size: int | None) -> bool:
         with urllib.request.urlopen(req, timeout=60) as resp:
             total = expected_size or (existing + int(resp.headers.get("Content-Length", 0)))
             written = existing
-            last_print = time.time()
+            last_print = started = time.time()
             with open(tmp, mode) as f:
                 while True:
                     chunk = resp.read(1024 * 1024 * 8)
@@ -107,7 +112,9 @@ def download(url: str, dest: Path, expected_size: int | None) -> bool:
                     written += len(chunk)
                     if time.time() - last_print > 5:
                         pct = (written / total * 100) if total else 0
-                        print(f"    {dest.name}: {written/1e9:.2f} / {total/1e9:.2f} GB ({pct:.1f}%)")
+                        speed = (written - existing) / max(time.time() - started, 1e-6)      # Byte/s dieser Sitzung (ohne bereits vorhandenen Teil)
+                        eta = f"{fmt_duration((total - written) / speed)}" if total and speed > 0 else "?"
+                        print(f"    {dest.name}: {written/1e9:.2f} / {total/1e9:.2f} GB ({pct:.1f}%)  {speed/1e6:.1f} MB/s  ETA {eta}")
                         last_print = time.time()
     except Exception as e:
         print(f"  ! Download unterbrochen ({e}) - beim naechsten Lauf wird fortgesetzt: {dest.name}")

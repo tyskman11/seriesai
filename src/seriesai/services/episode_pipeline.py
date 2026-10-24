@@ -14,6 +14,7 @@ without re-planning or re-queueing.
 from __future__ import annotations
 
 import json
+import sqlite3
 import time
 import uuid
 from datetime import datetime, timezone
@@ -24,7 +25,6 @@ from ..config import AppConfig
 from ..db import Database
 from ..logging_config import get_logger
 from .continuity_checker import ContinuityChecker
-from .dialogue_mux import DialogueMuxService
 from .episode_editor import EpisodeEditorService
 from .episode_planner import EpisodePlannerService
 from .shot_queue import ShotQueueService
@@ -42,6 +42,13 @@ class EpisodePipelineService:
         return {row[0]: row[1] for row in rows}
 
     def _save(self, job_id: str, series_id: str, payload: dict, checkpoint: dict, status: str, error: str | None = None) -> None:
+        for attempt in range(5):   # a lock held by another writer on the shared DB is transient: retry, don't fail the episode
+            try: return self._save_once(job_id, series_id, payload, checkpoint, status, error)
+            except sqlite3.OperationalError as exc:
+                if "locked" not in str(exc) or attempt == 4: raise
+                time.sleep(5 * (attempt + 1))
+
+    def _save_once(self, job_id: str, series_id: str, payload: dict, checkpoint: dict, status: str, error: str | None = None) -> None:
         with self.database.connect() as connection:
             connection.execute(
                 "INSERT INTO generation_jobs(job_id,series_id,job_type,status,payload_json,checkpoint_json,error_message,updated_at) VALUES(?,?,?,?,?,?,?,?) "
@@ -101,6 +108,11 @@ class EpisodePipelineService:
                 raise RuntimeError(f"{counts['cancelled']} Shots wurden abgebrochen (shot_job_id {shot_job_id}); Episode wird nicht automatisch zusammengesetzt.")
 
             report("dubbing", shot_job_id=shot_job_id)
+            # Dialogue mux pulls in optional audio/ML packages (notably numpy).
+            # Import it only once the render is actually complete, so an
+            # incomplete optional production stack cannot prevent the
+            # coordinator and dashboard from starting.
+            from .dialogue_mux import DialogueMuxService
             mux_results = DialogueMuxService(self.config, self.database).process_job(shot_job_id)
 
             report("assembling", shot_job_id=shot_job_id)

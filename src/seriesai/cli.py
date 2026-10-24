@@ -6,6 +6,7 @@ import platform
 import re
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 from .config import load_config
@@ -13,7 +14,6 @@ from .paths import project_relative
 from .console import ProgressReporter
 from .db import Database
 from .services import EpisodeImporter
-from .services.scene_detection import SceneDetectionService
 from .services.transcription import TranscriptionService
 from .services.semantic_analysis import SemanticAnalysisService
 from .services.character_inventory import CharacterInventoryService
@@ -51,6 +51,7 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers.add_parser("init-db", help="Create or migrate the Series Brain SQLite database")
     subparsers.add_parser("init", help="Alias for init-db")
     subparsers.add_parser("doctor", help="Report local SeriesAI prerequisites without changing them")
+    subparsers.add_parser("repair-production-dependencies", help="Install missing local NumPy and scene-analysis dependencies")
     import_parser = subparsers.add_parser("import", help="Import one local MP4 with resumable baseline stages")
     import_parser.add_argument("source", type=Path)
     import_parser.add_argument("--series-id", required=True)
@@ -219,6 +220,17 @@ def _run(args, config) -> None:
             "render_readiness": render_readiness(config),
         }
         print(json.dumps(details, indent=2, ensure_ascii=False))
+    elif args.command == "repair-production-dependencies":
+        # Kept as an explicit, logged job rather than an implicit dashboard
+        # side effect: this runs in the same venv as the NAS coordinator.
+        packages = ["numpy<2", "scenedetect[opencv]>=0.6.4,<0.7"]
+        print("Installiere lokale Produktionsabhängigkeiten: " + ", ".join(packages), flush=True)
+        result = subprocess.run([sys.executable, "-m", "pip", "install", *packages])
+        if result.returncode:
+            raise RuntimeError(f"Pip-Installation fehlgeschlagen (Code {result.returncode}).")
+        import numpy  # noqa: F401
+        from scenedetect import ContentDetector  # noqa: F401
+        print("NumPy und PySceneDetect sind installiert und importierbar.", flush=True)
     elif args.command == "import":
         db = Database(config.paths.series_root / "series.db")
         db.initialize(config.paths.project_root / "backups" / "migrations")
@@ -249,11 +261,16 @@ def _run(args, config) -> None:
             summary.append({"series_id": series_id, "title": title, "folder": str(folder), "total": len(results), "counts": counts})
         print(json.dumps({"series_root": str(root), "series": summary}, ensure_ascii=False, indent=2))
     elif args.command == "analyze-scenes":
+        # SceneDetect is an optional production dependency.  Loading it here,
+        # rather than while the dashboard merely builds its command list,
+        # keeps job administration available during a partial install.
+        from .services.scene_detection import SceneDetectionService
         db = Database(config.paths.series_root / "series.db")
         db.initialize(config.paths.project_root / "backups" / "migrations")
         result = SceneDetectionService(config, db).analyze_episode(args.episode_id, args.threshold)
         print(json.dumps({"episode_id": result.episode_id, "status": result.status, "scene_count": result.scene_count, "frame_directory": str(result.frame_directory)}, ensure_ascii=False))
     elif args.command == "analyze-series-scenes":
+        from .services.scene_detection import SceneDetectionService
         db = Database(config.paths.series_root / "series.db")
         db.initialize(config.paths.project_root / "backups" / "migrations")
         with db.connect() as connection: total = connection.execute("SELECT COUNT(*) FROM episodes e LEFT JOIN analysis_runs r ON r.episode_id=e.episode_id AND r.stage_name='scene_detection' AND r.status='completed' WHERE e.series_id = ? AND r.analysis_run_id IS NULL", (args.series_id,)).fetchone()[0]

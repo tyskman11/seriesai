@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
 import json
 import socket
+import threading
 import time
 from http.client import HTTPConnection
 from pathlib import Path
@@ -44,6 +46,33 @@ def upload(url: str, worker_id: str, path: Path) -> dict:
 INTENSITY_PAUSE_SECONDS = {"eco": 20.0, "balanced": 5.0, "full": 0.0}
 
 
+@contextmanager
+def keep_worker_alive(base: str, worker_id: str, interval_seconds: float = 20.0):
+    """Keep a claimed remote shot leased while ComfyUI renders or an MP4 uploads.
+
+    A video render regularly takes longer than the coordinator's stale-worker
+    timeout.  The worker is otherwise deliberately idle while waiting for
+    ComfyUI, so an explicit heartbeat prevents a live shot from being reclaimed.
+    """
+    stop = threading.Event()
+
+    def heartbeat() -> None:
+        while not stop.wait(interval_seconds):
+            try:
+                request_json(base + "/workers/" + worker_id + "/heartbeat", {})
+            except (HTTPError, URLError, OSError, json.JSONDecodeError) as error:
+                # Rendering may still complete while the coordinator is briefly
+                # unavailable.  The normal upload/failure flow reports the final state.
+                log.warning("Heartbeat für Worker %s fehlgeschlagen: %s", worker_id, error)
+
+    thread = threading.Thread(target=heartbeat, name="seriesai-worker-heartbeat", daemon=True)
+    thread.start()
+    try:
+        yield
+    finally:
+        stop.set()
+
+
 def run(master_url: str, worker_id: str, config_path: Path, poll_seconds: float, intensity: str = "full") -> None:
     config = load_config(config_path)
     if config.models.video_backend != "comfyui":
@@ -62,6 +91,10 @@ def run(master_url: str, worker_id: str, config_path: Path, poll_seconds: float,
             node = next((x for x in status.get("worker_nodes", []) if x.get("id") == worker_id), None)
             if node and node.get("role") == "coordinator-only":
                 log.info(f"Rolle coordinator-only: Rendering pausiert."); time.sleep(max(5, poll_seconds)); continue
+            try:
+                backend.ensure_running(intensity, config.hardware.gpu_vram_gb, log.info)
+            except RuntimeError as error:
+                log.error(f"ComfyUI: {error}"); time.sleep(30); continue
             inflight = request_json(base + "/render-queue/worker/" + worker_id + "/inflight").get("item")
             if inflight:
                 item_id, spec = inflight["item_id"], inflight["specification"]
@@ -75,12 +108,13 @@ def run(master_url: str, worker_id: str, config_path: Path, poll_seconds: float,
                     time.sleep(max(5, poll_seconds)); continue
                 log.info(f"Setze lokalen ComfyUI-Auftrag für Shot {spec.get('sequence_number')} fort …")
                 try:
-                    local_output = Path(backend.wait_for_prompt(prompt_id, spec))
-                    result = upload(base + "/render-queue/items/" + item_id + "/upload", worker_id, local_output)
+                    with keep_worker_alive(base, worker_id):
+                        local_output = Path(backend.wait_for_prompt(prompt_id, spec))
+                        result = upload(base + "/render-queue/items/" + item_id + "/upload", worker_id, local_output)
                     log.info(f"Wiederhergestellter Shot fertig: {result.get('output_path', local_output)}")
                 except Exception as error:
                     request_json(base + "/render-queue/items/" + item_id + "/fail", {"worker_id": worker_id, "error": str(error), "retry": True})
-                    log.error(f"Wiederhergestellter Shot fehlgeschlagen: {error}")
+                    log.exception("Wiederhergestellter Shot fehlgeschlagen: %s", error)
                 if intensity_pause: time.sleep(intensity_pause)
                 continue
             claimed = request_json(base + "/render-queue/claim-next", {"worker_id": worker_id}).get("item")
@@ -91,12 +125,13 @@ def run(master_url: str, worker_id: str, config_path: Path, poll_seconds: float,
             try:
                 def submitted(prompt_id: str) -> None:
                     request_json(base + "/render-queue/items/" + item_id + "/submission", {"worker_id": worker_id, "backend": "comfyui", "prompt_id": prompt_id})
-                local_output = Path(backend.render_shot(spec, on_submitted=submitted))
-                result = upload(base + "/render-queue/items/" + item_id + "/upload", worker_id, local_output)
+                with keep_worker_alive(base, worker_id):
+                    local_output = Path(backend.render_shot(spec, on_submitted=submitted))
+                    result = upload(base + "/render-queue/items/" + item_id + "/upload", worker_id, local_output)
                 log.info(f"Shot fertig: {result.get('output_path', local_output)}")
             except Exception as error:
                 request_json(base + "/render-queue/items/" + item_id + "/fail", {"worker_id": worker_id, "error": str(error), "retry": True})
-                log.error(f"Shot fehlgeschlagen, Retry gespeichert: {error}")
+                log.exception("Shot fehlgeschlagen, Retry gespeichert: %s", error)
             if intensity_pause: time.sleep(intensity_pause)
         except (HTTPError, URLError, OSError, json.JSONDecodeError) as error:
             outage += 1
@@ -107,7 +142,7 @@ def run(master_url: str, worker_id: str, config_path: Path, poll_seconds: float,
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run one portable local ComfyUI SeriesAI worker.")
-    parser.add_argument("--master", required=True, help="Coordinator URL, for example http://192.168.1.20:8765")
+    parser.add_argument("--master", required=True, help="Coordinator URL, for example http://192.168.1.20:8770")
     parser.add_argument("--worker-id", default=(socket.gethostname().lower() + "::worker"))
     parser.add_argument("--config", type=Path, default=Path("config.yaml"))
     parser.add_argument("--poll-seconds", type=float, default=4.0)
