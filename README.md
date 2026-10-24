@@ -38,7 +38,7 @@ cd <PROJECT_ROOT>
 python start.py
 ```
 
-`python start.py` is the only start script. It starts llama.cpp, ComfyUI, the local dashboard/queue server and the local render worker in one terminal, with every output line prefixed (`[LLM]`, `[ComfyUI]`, `[Server]`, `[Worker]`) next to the live monitor. Services that already answer (for example a running ComfyUI) are not started twice. `Strg+C` stops the monitor and every service started by it.
+`python start.py` is the only start script. It starts llama.cpp, ComfyUI, the local dashboard/queue server and the local render worker in one terminal, with every output line prefixed (`[LLM]`, `[ComfyUI]`, `[Server]`, `[Worker]`) next to the live monitor. Services that already answer (for example a running ComfyUI) are not started twice. `Ctrl+C` stops the monitor and every service started by it.
 
 The All-for-One hub (the web site two folders above this project) is the coordinator for everything that spans PCs; SeriesAI itself has no coordinator mode, LAN discovery or role election. The hub's agent starts and stops this project by running `start.py` and checks that the dashboard answers on port 8770.
 
@@ -128,8 +128,8 @@ python -m seriesai.cli analyze-series-semantics --series-id game_shakers
 ```
 
 For the currently imported Game Shakers material this stage is complete for
-all 62 episodes. The dashboard displays `Series Brain fertig` separately from
-currently active jobs; `Keine aktive Aufgabe` therefore correctly means that
+all 62 episodes. The dashboard displays `Series Brain complete` separately from
+currently active jobs; `No active job` therefore correctly means that
 the queued work has finished.
 
 The next step proposes *reviewable* recurring character identities from the
@@ -146,8 +146,8 @@ accidentally turning a transcription mistake or a one-off guest into a series
 character.
 
 The local dashboard exposes these proposals under **Figuren-Pruefung**. Enter
-the proposed stable ID (for example `babe_001`) and choose **Freigeben**, or
-choose **Ablehnen** for a false recognition. The same audited actions are
+the proposed stable ID (for example `babe_001`) and choose **Approve**, or
+choose **Reject** for a false recognition. The same audited actions are
 available in the CLI with `list-character-candidates`, `approve-character`,
 and `reject-character`.
 
@@ -212,7 +212,7 @@ co-mentions with their source episodes in `relationship_proposals`. It does
 not invent trust, romance, conflict, or relationship-history values. Those
 require later human review and an explicit approval action.
 
-The dashboard's **Beziehungsbelege** section lists the participating figures,
+The dashboard's **Relationship evidence** section lists the participating figures,
 event count and source episodes for every proposal.
 
 ## Draft continuity gate
@@ -341,7 +341,7 @@ Restore the complete set while SeriesAI is stopped. The database is intentionall
 - With 6 GB VRAM, keep `prefer_cpu_offload: true`. Backends will expose VRAM/offload options instead of assuming a large GPU.
 - If a job crashes later, its `generation_jobs` record, checkpoint JSON, attempts, and individual `rendered_shots` statuses will determine precisely what is resumed.
 
-`Strg+C` beendet nur die Monitoranzeige, nicht den Koordinator oder laufende Analysejobs. See [Architecture](docs/ARCHITECTURE.md), [database design](docs/DATABASE.md), [ComfyUI integration](docs/COMFYUI.md), and [model backends](docs/MODELS.md).
+`Ctrl+C` stops only the monitor display, not the coordinator or any running analysis jobs. See [Architecture](docs/ARCHITECTURE.md), [database design](docs/DATABASE.md), [ComfyUI integration](docs/COMFYUI.md), and [model backends](docs/MODELS.md).
 
 The coordinator always runs with the project's `.venv` Python. This keeps the
 single visible `start.py` monitor while ensuring dashboard restarts retain all
